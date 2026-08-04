@@ -6,7 +6,12 @@ import type { PresenceState, Room, SyncEvent } from "@/lib/types";
 const HEARTBEAT_INTERVAL_MS = 4000;
 const DB_PERSIST_INTERVAL_MS = 10000;
 
-export type ConnectionStatus = "connecting" | "both-connected" | "partner-away";
+export type ConnectionStatus =
+  | "connecting" // initial channel subscribe hasn't resolved yet
+  | "both-connected"
+  | "waiting-for-partner" // nobody but you has ever joined this session
+  | "partner-away" // partner joined earlier, then their connection dropped
+  | "reconnecting"; // our own realtime socket dropped and is retrying
 
 interface UseRoomSyncOptions {
   roomCode: string;
@@ -29,10 +34,14 @@ export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
   const [lastEvent, setLastEvent] = useState<SyncEvent | null>(null);
   const [presentNames, setPresentNames] = useState<string[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [isChannelReconnecting, setIsChannelReconnecting] = useState(false);
 
   const channelRef = useRef<RealtimeChannel | null>(null);
   const roomIdRef = useRef<string | null>(null);
   const lastPersistRef = useRef(0);
+  const partnerEverJoinedRef = useRef(false);
+  const hasSubscribedOnceRef = useRef(false);
 
   const partnerName = presentNames.find((n) => n !== myName) ?? null;
   const isController = room?.controller_name === myName;
@@ -110,7 +119,18 @@ export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
 
     channel.subscribe(async (status) => {
       if (status === "SUBSCRIBED") {
+        hasSubscribedOnceRef.current = true;
+        setReconnectAttempts(0);
+        setIsChannelReconnecting(false);
         await channel.track({ name: myName, onlineAt: Date.now() } satisfies PresenceState);
+      } else if (hasSubscribedOnceRef.current) {
+        // We were connected before and the socket dropped (CLOSED,
+        // CHANNEL_ERROR, TIMED_OUT). Supabase's realtime client retries
+        // the underlying socket on its own — we just reflect that state
+        // in the UI instead of silently leaving people on a stale
+        // "both here" badge.
+        setIsChannelReconnecting(true);
+        setReconnectAttempts((n) => n + 1);
       }
     });
 
@@ -119,12 +139,21 @@ export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
     };
   }, [roomCode, myName]);
 
-  // ── Connection status derived from presence ──
+  // ── Connection status derived from presence + channel health ──
   useEffect(() => {
-    if (presentNames.length >= 2) setConnectionStatus("both-connected");
-    else if (presentNames.length === 1) setConnectionStatus("partner-away");
-    else setConnectionStatus("connecting");
-  }, [presentNames]);
+    if (isChannelReconnecting) {
+      setConnectionStatus("reconnecting");
+      return;
+    }
+    if (presentNames.length >= 2) {
+      partnerEverJoinedRef.current = true;
+      setConnectionStatus("both-connected");
+    } else if (presentNames.length === 1) {
+      setConnectionStatus(partnerEverJoinedRef.current ? "partner-away" : "waiting-for-partner");
+    } else {
+      setConnectionStatus("connecting");
+    }
+  }, [presentNames, isChannelReconnecting]);
 
   const broadcast = useCallback((event: SyncEvent) => {
     channelRef.current?.send({ type: "broadcast", event: "sync", payload: event });
@@ -207,6 +236,7 @@ export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
     partnerName,
     isController,
     connectionStatus,
+    reconnectAttempts,
     heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
     broadcastPlay,
     broadcastPause,
