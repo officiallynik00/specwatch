@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: #0a0b10;
+  color: #f1ede4;
+}
+
+body {
+  min-height: 100dvh;
+}
+
+/* Subtle sprocket-hole rule — the film-reel signature motif used to
+   separate sections instead of a generic divider line. */
+.sprocket-rule {
+  height: 1px;
+  background-image: radial-gradient(
+    circle,
+    #2a2e3d 1.5px,
+    transparent 1.6px
+  );
+  background-size: 14px 1px;
+  background-repeat: repeat-x;
+  background-position: center;
+}
+
+/* Faint grain overlay so the dark background doesn't feel flat. */
+.grain-overlay::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.4;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+  z-index: 0;
+}
+
+/* Custom range input styling for the seek bar */
+input[type="range"].seekbar {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: #2a2e3d;
+  outline: none;
+}
+input[type="range"].seekbar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #e8a548;
+  cursor: pointer;
+  box-shadow: 0 0 0 4px rgba(232, 165, 72, 0.15);
+}
+input[type="range"].seekbar::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 999px;
+  background: #e8a548;
+  cursor: pointer;
+}
+
+::selection {
+  background: #e8a548;
+  color: #0a0b10;
+}
