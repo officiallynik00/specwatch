@@ -12,6 +12,18 @@ export interface Room {
   total_watch_seconds: number;
 }
 
+// A single uploaded file in a room's persistent movie library. Distinct
+// from `Room.movie_path`, which just points at whichever library item is
+// currently loaded into the shared player.
+export interface Movie {
+  id: string;
+  room_id: string;
+  storage_path: string;
+  title: string;
+  file_size_bytes: number | null;
+  uploaded_at: string;
+}
+
 export interface ChatMessage {
   id: string;
   room_id: string;
