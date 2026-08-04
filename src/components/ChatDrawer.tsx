@@ -54,29 +54,34 @@ export default function ChatDrawer({ open, onToggle, messages, myName, onSend }:
 
   return (
     <>
-      <button
-        onClick={onToggle}
-        className="fixed bottom-5 right-5 z-30 flex h-12 w-12 items-center justify-center rounded-full border border-reel-border bg-reel-surface text-reel-text shadow-lg shadow-black/40 transition hover:border-reel-amber"
-        aria-label={open ? "Close chat" : "Open chat"}
-      >
-        💬
-        {!open && unreadCount > 0 && (
-          <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-reel-rose px-1 text-[10px] font-bold text-white">
-            {unreadCount > 9 ? "9+" : unreadCount}
-          </span>
-        )}
-      </button>
+      {/* Only rendered while closed — the open drawer has its own ✕ close
+          button in its header, and this FAB sat at the same bottom-right
+          corner as the drawer's Send button, overlapping it when open. */}
+      {!open && (
+        <button
+          onClick={onToggle}
+          className="fixed bottom-5 right-5 z-30 flex h-12 w-12 items-center justify-center rounded-full border border-reel-border bg-reel-surface text-reel-text shadow-lg shadow-black/40 transition hover:border-reel-amber"
+          aria-label="Open chat"
+        >
+          💬
+          {unreadCount > 0 && (
+            <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-reel-rose px-1 text-[10px] font-bold text-white">
+              {unreadCount > 9 ? "9+" : unreadCount}
+            </span>
+          )}
+        </button>
+      )}
 
       {open && (
         <div className="fixed bottom-0 right-0 z-20 flex h-[70dvh] w-full max-w-sm animate-slideUp flex-col rounded-t-2xl border border-reel-border bg-reel-surface shadow-2xl shadow-black/60 sm:bottom-5 sm:right-5 sm:h-[520px] sm:rounded-2xl">
-          <div className="flex items-center justify-between rounded-t-2xl border-b border-reel-border bg-reel-surface2 px-4 py-3">
+          <div className="flex shrink-0 items-center justify-between rounded-t-2xl border-b border-reel-border bg-reel-surface2 px-4 py-3">
             <span className="font-display text-lg italic text-reel-text">Chat</span>
             <button onClick={onToggle} className="text-reel-muted hover:text-reel-text" aria-label="Close chat">
               ✕
             </button>
           </div>
 
-          <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+          <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
             {messages.length === 0 && (
               <p className="pt-8 text-center text-sm text-reel-muted">
                 No messages yet. Say hi before the movie starts.
@@ -104,17 +109,19 @@ export default function ChatDrawer({ open, onToggle, messages, myName, onSend }:
             })}
           </div>
 
-          <form onSubmit={handleSubmit} className="flex gap-2 border-t border-reel-border p-3">
+          {/* min-w-0 keeps the input from overflowing its flex basis and
+              pushing/overlapping the Send button at narrow widths. */}
+          <form onSubmit={handleSubmit} className="flex shrink-0 gap-2 border-t border-reel-border p-3">
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="Type a message…"
-              className="flex-1 rounded-full border border-reel-border bg-reel-bg px-4 py-2 text-sm text-reel-text placeholder:text-reel-muted/60 focus:border-reel-amber focus:outline-none"
+              className="min-w-0 flex-1 rounded-full border border-reel-border bg-reel-bg px-4 py-2 text-sm text-reel-text placeholder:text-reel-muted/60 focus:border-reel-amber focus:outline-none"
               autoComplete="off"
             />
             <button
               type="submit"
-              className="rounded-full bg-reel-amber px-4 py-2 text-sm font-medium text-reel-bg transition hover:bg-reel-amberDim"
+              className="shrink-0 rounded-full bg-reel-amber px-4 py-2 text-sm font-medium text-reel-bg transition hover:bg-reel-amberDim"
             >
               Send
             </button>

@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase/client";
 import type { ConnectionStatus } from "@/hooks/useRoomSync";
-import type { Room, SyncEvent } from "@/lib/types";
+import type { ChatMessage, Room, SyncEvent } from "@/lib/types";
+import FullscreenChatOverlay from "@/components/FullscreenChatOverlay";
 
 const SMALL_DRIFT_THRESHOLD = 0.5; // seconds — corrected via a gentle playbackRate nudge
 const LARGE_DRIFT_THRESHOLD = 1.5; // seconds — hard resync + visible status
@@ -26,6 +27,8 @@ interface VideoPlayerProps {
   broadcastHeartbeat: (t: number, playing: boolean) => void;
   takeController: () => void;
   onEmoji: (emoji: string, by: string) => void;
+  chatMessages: ChatMessage[];
+  onSendChat: (body: string) => void;
 }
 
 function formatTime(seconds: number): string {
@@ -52,6 +55,8 @@ export default function VideoPlayer({
   broadcastHeartbeat,
   takeController,
   onEmoji,
+  chatMessages,
+  onSendChat,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -64,6 +69,7 @@ export default function VideoPlayer({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isPiP, setIsPiP] = useState(false);
   const [pipSupported, setPipSupported] = useState(false);
+  const [fullscreenChatEnabled, setFullscreenChatEnabled] = useState(true);
   const wasBothConnectedRef = useRef(false);
   const initializedRef = useRef(false);
   const noteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -437,10 +443,39 @@ export default function VideoPlayer({
           </div>
         )}
 
-        {/* Fullscreen / PiP controls float over the video itself so they're
-            reachable even while the bottom control bar is off-screen in
-            fullscreen mode. */}
+        {/* Fullscreen chat: only exists inside this element's subtree, so
+            it's actually visible while the Fullscreen API is active —
+            unlike the page-level ChatDrawer, which the browser hides. */}
+        {isFullscreen && fullscreenChatEnabled && (
+          <FullscreenChatOverlay
+            messages={chatMessages}
+            myName={myName}
+            onSend={onSendChat}
+            onDisable={() => setFullscreenChatEnabled(false)}
+          />
+        )}
+
+        {/* Fullscreen / PiP / chat-toggle controls float over the video
+            itself so they're reachable even while the bottom control bar
+            is off-screen in fullscreen mode. */}
         <div className="absolute right-3 top-3 flex gap-2">
+          {isFullscreen && (
+            <button
+              onClick={() => setFullscreenChatEnabled((v) => !v)}
+              aria-label={fullscreenChatEnabled ? "Disable chat" : "Enable chat"}
+              aria-pressed={fullscreenChatEnabled}
+              title={fullscreenChatEnabled ? "Disable chat" : "Enable chat"}
+              className={`flex h-8 w-8 items-center justify-center rounded-full backdrop-blur transition ${
+                fullscreenChatEnabled
+                  ? "bg-reel-amber text-reel-bg"
+                  : "bg-black/60 text-reel-text hover:bg-black/80"
+              }`}
+            >
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M4 5.5a1.5 1.5 0 0 1 1.5-1.5h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H9l-4 3.5V16H5.5A1.5 1.5 0 0 1 4 14.5v-9Z" />
+              </svg>
+            </button>
+          )}
           {pipSupported && (
             <button
               onClick={togglePiP}
