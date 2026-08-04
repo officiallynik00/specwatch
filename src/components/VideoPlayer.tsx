@@ -76,6 +76,38 @@ export default function VideoPlayer({
   const bufferAutoPausedRef = useRef(false);
   const fsControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [movieUrl, setMovieUrl] = useState<string | null>(null);
+
+useEffect(() => {
+  if (!room.movie_path) {
+    setMovieUrl(null);
+    return;
+  }
+  let cancelled = false;
+  (async () => {
+    try {
+      const res = await fetch("/api/r2-play-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: room.movie_path }),
+      });
+      const data = await res.json();
+      if (!cancelled) {
+        if (res.ok && data.url) setMovieUrl(data.url);
+        else {
+          setMovieUrl(null);
+          showNote("Couldn't load this movie — try re-uploading.");
+        }
+      }
+    } catch {
+      if (!cancelled) setMovieUrl(null);
+    }
+  })();
+  return () => {
+    cancelled = true;
+  };
+}, [room.movie_path, showNote]);
+
   const showNote = useCallback((text: string, ms = 2500) => {
     setStatusNote(text);
     if (noteTimeoutRef.current) clearTimeout(noteTimeoutRef.current);
