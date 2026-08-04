@@ -70,10 +70,12 @@ export default function VideoPlayer({
   const [isPiP, setIsPiP] = useState(false);
   const [pipSupported, setPipSupported] = useState(false);
   const [fullscreenChatEnabled, setFullscreenChatEnabled] = useState(true);
+  const [fsControlsVisible, setFsControlsVisible] = useState(true);
   const wasBothConnectedRef = useRef(false);
   const initializedRef = useRef(false);
   const noteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bufferAutoPausedRef = useRef(false);
+  const fsControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const movieUrl = room.movie_path
     ? supabase.storage.from(MOVIE_BUCKET).getPublicUrl(room.movie_path).data.publicUrl
@@ -84,23 +86,28 @@ export default function VideoPlayer({
     if (noteTimeoutRef.current) clearTimeout(noteTimeoutRef.current);
     noteTimeoutRef.current = setTimeout(() => setStatusNote(null), ms);
   }, []);
-  
+
+  const wakeFsControls = useCallback(() => {
+    setFsControlsVisible(true);
+    if (fsControlsTimerRef.current) clearTimeout(fsControlsTimerRef.current);
+    fsControlsTimerRef.current = setTimeout(() => setFsControlsVisible(false), 3000);
+  }, []);
 
   // ── Resume from last saved position once metadata is ready ──
-const handleLoadedMetadata = useCallback(() => {
-  const video = videoRef.current;
-  if (!video || initializedRef.current) return;
-  initializedRef.current = true;
-  video.currentTime = room.last_position_seconds || 0;
-  setDuration(video.duration || 0);
-}, [room.last_position_seconds]);
+  const handleLoadedMetadata = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || initializedRef.current) return;
+    initializedRef.current = true;
+    video.currentTime = room.last_position_seconds || 0;
+    setDuration(video.duration || 0);
+  }, [room.last_position_seconds]);
 
   // Re-arm the "seek to saved position" logic whenever the room switches
-// to a different file — otherwise initializedRef stays true forever and
-// duration/seek state goes stale after the host picks a new movie.
-useEffect(() => {
-  initializedRef.current = false;
-}, [room.movie_path]);
+  // to a different file — otherwise initializedRef stays true forever and
+  // duration/seek state goes stale after the host picks a new movie.
+  useEffect(() => {
+    initializedRef.current = false;
+  }, [room.movie_path]);
 
   // ── Controller heartbeat loop ──
   useEffect(() => {
@@ -224,6 +231,16 @@ useEffect(() => {
       if (videoRef.current) videoRef.current.playbackRate = 1;
     };
   }, []);
+
+  // Reveal controls on fullscreen entry; clear timer + force visible on exit
+  useEffect(() => {
+    if (isFullscreen) {
+      wakeFsControls();
+    } else if (fsControlsTimerRef.current) {
+      clearTimeout(fsControlsTimerRef.current);
+      setFsControlsVisible(true);
+    }
+  }, [isFullscreen, wakeFsControls]);
 
   // ── Local element event handlers ──
   const onVideoPlay = () => setIsPlaying(true);
@@ -389,6 +406,87 @@ useEffect(() => {
     }
   }, [current, duration]);
 
+  const renderControlBar = (overlay: boolean) => (
+    <div
+      className={
+        overlay
+          ? `absolute inset-x-0 bottom-0 z-10 flex flex-wrap items-center gap-2 bg-gradient-to-t from-black/85 via-black/50 to-transparent px-3 pb-3 pt-10 transition-opacity duration-500 sm:gap-3 sm:px-5 sm:pb-4 ${
+              fsControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+            }`
+          : "mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-reel-border bg-reel-surface px-3 py-2.5 sm:gap-3 sm:px-4 sm:py-3"
+      }
+    >
+      <div className="flex shrink-0 items-center gap-2">
+        <button
+          onClick={handlePlayPauseClick}
+          disabled={!isPlaying && !isController}
+          aria-label={isPlaying ? "Pause" : "Play"}
+          title={
+            !isController
+              ? isPlaying
+                ? "Pause (anyone can pause)"
+                : `Only ${room.host_name ?? "the host"} can start playback`
+              : undefined
+          }
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-reel-amber text-reel-bg transition disabled:cursor-not-allowed disabled:bg-reel-border disabled:text-reel-muted sm:h-9 sm:w-9"
+        >
+          {isPlaying ? "❚❚" : "▶"}
+        </button>
+
+        {isController && (
+          <>
+            <button
+              onClick={() => handleSkip(-10)}
+              aria-label="Back 10 seconds"
+              className="text-[11px] text-reel-muted hover:text-reel-text sm:text-xs"
+            >
+              −10s
+            </button>
+            <button
+              onClick={() => handleSkip(10)}
+              aria-label="Forward 10 seconds"
+              className="text-[11px] text-reel-muted hover:text-reel-text sm:text-xs"
+            >
+              +10s
+            </button>
+          </>
+        )}
+      </div>
+
+      <div className="flex min-w-0 flex-1 basis-full items-center gap-2 sm:basis-auto">
+        <span className="font-mono text-[10px] text-reel-muted sm:text-xs">
+          {formatTime(current)}
+        </span>
+        <input
+          type="range"
+          className="seekbar min-w-0 flex-1"
+          min={0}
+          max={duration || 0}
+          step={0.5}
+          value={current}
+          disabled={!isController}
+          onChange={(e) => setCurrent(Number(e.target.value))}
+          onMouseUp={(e) =>
+            handleSeekCommit(Number((e.target as HTMLInputElement).value))
+          }
+          onTouchEnd={(e) =>
+            handleSeekCommit(Number((e.target as HTMLInputElement).value))
+          }
+          aria-label="Seek"
+        />
+        <span className="font-mono text-[10px] text-reel-muted sm:text-xs">
+          {formatTime(duration)}
+        </span>
+      </div>
+
+      {!isController && (
+        <span className="shrink-0 rounded-full border border-reel-border bg-black/30 px-2.5 py-1 text-[10px] text-reel-muted backdrop-blur-sm sm:px-3 sm:py-1.5 sm:text-xs">
+          {room.host_name ?? "Host"} controls playback
+        </span>
+      )}
+    </div>
+  );
+
   if (!movieUrl) {
     return (
       <div className="flex aspect-video w-full items-center justify-center rounded-xl border border-dashed border-reel-border bg-reel-surface text-reel-muted">
@@ -401,14 +499,22 @@ useEffect(() => {
     <div className="w-full">
       <div
         ref={containerRef}
+        onMouseMove={() => isFullscreen && wakeFsControls()}
+        onTouchStart={() => isFullscreen && wakeFsControls()}
         className={`relative overflow-hidden border border-reel-border bg-black shadow-2xl shadow-black/50 ${
-          isFullscreen ? "flex h-full w-full items-center justify-center rounded-none" : "rounded-xl"
+          isFullscreen
+            ? "flex h-full w-full items-center justify-center rounded-none"
+            : "rounded-xl"
         }`}
       >
         <video
           ref={videoRef}
           src={movieUrl}
-          className={isFullscreen ? "h-full max-h-screen w-full object-contain bg-black" : "aspect-video w-full bg-black"}
+          className={
+            isFullscreen
+              ? "h-full max-h-screen w-full object-contain bg-black"
+              : "aspect-video w-full bg-black"
+          }
           onLoadedMetadata={handleLoadedMetadata}
           onPlay={onVideoPlay}
           onPause={onVideoPause}
@@ -473,7 +579,13 @@ useEffect(() => {
                   : "bg-black/60 text-reel-text hover:bg-black/80"
               }`}
             >
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                viewBox="0 0 24 24"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <path d="M4 5.5a1.5 1.5 0 0 1 1.5-1.5h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H9l-4 3.5V16H5.5A1.5 1.5 0 0 1 4 14.5v-9Z" />
               </svg>
             </button>
@@ -485,7 +597,13 @@ useEffect(() => {
               title={isPiP ? "Exit mini-player" : "Mini-player"}
               className="flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-reel-text backdrop-blur transition hover:bg-black/80"
             >
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                viewBox="0 0 24 24"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <rect x="3" y="4" width="18" height="14" rx="1.5" />
                 <rect x="12" y="11" width="7" height="5" rx="1" fill="currentColor" stroke="none" />
               </svg>
@@ -498,79 +616,35 @@ useEffect(() => {
             className="flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-reel-text backdrop-blur transition hover:bg-black/80"
           >
             {isFullscreen ? (
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                viewBox="0 0 24 24"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <path d="M9 4v4a1 1 0 0 1-1 1H4M15 4v4a1 1 0 0 0 1 1h4M9 20v-4a1 1 0 0 0-1-1H4M15 20v-4a1 1 0 0 1 1-1h4" />
               </svg>
             ) : (
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                viewBox="0 0 24 24"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4" />
               </svg>
             )}
           </button>
         </div>
+
+        {/* Fullscreen overlay control bar — fades after 3 s idle */}
+        {isFullscreen && renderControlBar(true)}
       </div>
 
-      {/* Controls */}
-      {!isFullscreen && (
-        <div className="mt-3 flex items-center gap-3 rounded-xl border border-reel-border bg-reel-surface px-4 py-3">
-          <button
-            onClick={handlePlayPauseClick}
-            disabled={!isPlaying && !isController}
-            aria-label={isPlaying ? "Pause" : "Play"}
-            title={
-              !isController
-                ? isPlaying
-                  ? "Pause (anyone can pause)"
-                  : `Only ${room.host_name ?? "the host"} can start playback`
-                : undefined
-            }
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-reel-amber text-reel-bg transition disabled:cursor-not-allowed disabled:bg-reel-border disabled:text-reel-muted"
-          >
-            {isPlaying ? "❚❚" : "▶"}
-          </button>
-
-          {isController && (
-            <>
-              <button
-                onClick={() => handleSkip(-10)}
-                aria-label="Back 10 seconds"
-                className="text-xs text-reel-muted hover:text-reel-text"
-              >
-                −10s
-              </button>
-              <button
-                onClick={() => handleSkip(10)}
-                aria-label="Forward 10 seconds"
-                className="text-xs text-reel-muted hover:text-reel-text"
-              >
-                +10s
-              </button>
-            </>
-          )}
-
-          <span className="font-mono text-xs text-reel-muted">{formatTime(current)}</span>
-          <input
-            type="range"
-            className="seekbar flex-1"
-            min={0}
-            max={duration || 0}
-            step={0.5}
-            value={current}
-            disabled={!isController}
-            onChange={(e) => setCurrent(Number(e.target.value))}
-            onMouseUp={(e) => handleSeekCommit(Number((e.target as HTMLInputElement).value))}
-            onTouchEnd={(e) => handleSeekCommit(Number((e.target as HTMLInputElement).value))}
-            aria-label="Seek"
-          />
-          <span className="font-mono text-xs text-reel-muted">{formatTime(duration)}</span>
-
-          {!isController && (
-            <span className="ml-1 shrink-0 rounded-full border border-reel-border px-3 py-1.5 text-xs text-reel-muted">
-              {room.host_name ?? "Host"} controls playback
-            </span>
-          )}
-        </div>
-      )}
+      {/* Docked control bar (non-fullscreen) */}
+      {!isFullscreen && renderControlBar(false)}
     </div>
   );
 }
