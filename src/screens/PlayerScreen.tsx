@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useRoomSync } from "@/hooks/useRoomSync";
 import { useChat } from "@/hooks/useChat";
@@ -17,6 +17,9 @@ export default function PlayerScreen() {
   const [name, setName] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [bubbles, setBubbles] = useState<FloatingBubble[]>([]);
+  const [justLoadedNotice, setJustLoadedNotice] = useState(false);
+  const hadMovieRef = useRef(false);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setName(sessionStorage.getItem("watchparty:name"));
@@ -24,6 +27,26 @@ export default function PlayerScreen() {
 
   const sync = useRoomSync({ roomCode: code, myName: name ?? "" });
   const { messages, sendMessage } = useChat(sync.room?.id ?? null);
+
+  // Fires the "movie's ready" notice the moment the room transitions
+  // from no-movie to a movie being loaded — mainly for the visitor, who
+  // was sitting on the waiting screen below and just watched it turn
+  // into a real player.
+  useEffect(() => {
+    const hasMovie = !!sync.room?.movie_path;
+    if (hasMovie && !hadMovieRef.current) {
+      setJustLoadedNotice(true);
+      if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+      noticeTimeoutRef.current = setTimeout(() => setJustLoadedNotice(false), 4000);
+    }
+    hadMovieRef.current = hasMovie;
+  }, [sync.room?.movie_path]);
+
+  useEffect(() => {
+    return () => {
+      if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+    };
+  }, []);
 
   const addBubble = useCallback((emoji: string) => {
     const bubble: FloatingBubble = {
@@ -92,8 +115,33 @@ export default function PlayerScreen() {
   }
 
   if (!sync.room.movie_path) {
-    router.replace(`/room/${code}`);
-    return null;
+    if (sync.isHost) {
+      // The host manages the library from the lobby, not here — send
+      // them back to pick something.
+      router.replace(`/room/${code}`);
+      return null;
+    }
+
+    // Visitor: stay right here and wait. The room-row subscription in
+    // useRoomSync will flip sync.room.movie_path the moment the host
+    // loads something, which re-renders this component straight into
+    // the real player below — no navigation needed.
+    return (
+      <main className="flex min-h-dvh flex-col items-center justify-center gap-4 px-6 text-center">
+        <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-reel-amber">
+          room {code}
+        </p>
+        <div className="h-10 w-10 animate-spin rounded-full border-2 border-reel-amber border-t-transparent" />
+        <p className="font-display text-2xl italic text-reel-text">
+          Waiting for {sync.room.host_name ?? "the host"} to pick a movie
+        </p>
+        <p className="max-w-xs text-sm text-reel-muted">
+          You're in the room — this screen will switch to the player automatically the moment
+          something's loaded.
+        </p>
+        <ConnectionStatus status={sync.connectionStatus} />
+      </main>
+    );
   }
 
   return (
@@ -108,6 +156,12 @@ export default function PlayerScreen() {
         <ConnectionStatus status={sync.connectionStatus} />
       </header>
 
+      {justLoadedNotice && (
+        <div className="rounded-xl border border-reel-amber/40 bg-reel-amber/10 px-4 py-2.5 text-sm text-reel-amber">
+          🎬 {sync.room.movie_title} is loaded and ready.
+        </div>
+      )}
+
       <div className="relative">
         <VideoPlayer
           room={sync.room}
@@ -121,7 +175,6 @@ export default function PlayerScreen() {
           broadcastPause={sync.broadcastPause}
           broadcastSeek={sync.broadcastSeek}
           broadcastHeartbeat={sync.broadcastHeartbeat}
-          takeController={sync.takeController}
           onEmoji={handleRemoteEmoji}
           chatMessages={messages}
           onSendChat={handleSendChat}
