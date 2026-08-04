@@ -19,17 +19,22 @@ export default function HomeScreen() {
     setLoading(true);
     setError(null);
 
+    const trimmedName = name.trim();
+
     // Retry on the rare unique-code collision.
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = generateRoomCode();
+      // Whoever creates the room is the host for the whole session — this
+      // is what controls playback and sees the movie library, set once
+      // here rather than decided later by who happens to load first.
       const { error: insertError } = await supabase
         .from("rooms")
-        .insert({ code })
+        .insert({ code, host_name: trimmedName })
         .select()
         .single();
 
       if (!insertError) {
-        sessionStorage.setItem("watchparty:name", name.trim());
+        sessionStorage.setItem("watchparty:name", trimmedName);
         router.push(`/room/${code}`);
         return;
       }
@@ -140,6 +145,12 @@ export default function HomeScreen() {
                   autoComplete="off"
                 />
               </div>
+            )}
+
+            {mode === "create" && (
+              <p className="text-xs text-reel-muted">
+                You'll be the host — you upload the movie and control playback for both of you.
+              </p>
             )}
 
             {error && <p className="text-sm text-reel-rose">{error}</p>}
