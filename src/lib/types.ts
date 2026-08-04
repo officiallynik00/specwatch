@@ -5,7 +5,9 @@ export interface Room {
   movie_path: string | null;
   movie_title: string | null;
   movie_uploaded_at: string | null;
-  controller_name: string | null;
+  // The single source of truth for who controls playback — set once at
+  // room creation to whoever hit "Start a room". Never changes hands.
+  host_name: string | null;
   is_playing: boolean;
   last_position_seconds: number;
   last_heartbeat_at: string;
@@ -35,6 +37,10 @@ export interface ChatMessage {
 // ── Realtime broadcast event payloads ──────────────────────────
 // These travel over the room's realtime channel (not the DB) for
 // low-latency, high-frequency events: heartbeats, seeks, emoji.
+//
+// NOTE: there is no "controller-change" event anymore — control is
+// fixed to whoever is `host_name` on the room row and never hands off,
+// so there's nothing to broadcast when it changes.
 
 export type SyncEvent =
   | {
@@ -61,10 +67,6 @@ export type SyncEvent =
       currentTime: number;
       controllerName: string;
       serverSentAt: number;
-    }
-  | {
-      type: "controller-change";
-      controllerName: string;
     }
   | {
       type: "emoji";
