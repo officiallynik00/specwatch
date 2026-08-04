@@ -50,11 +50,36 @@ export function useChat(roomId: string | null) {
   const sendMessage = useCallback(
     async (senderName: string, body: string) => {
       if (!roomId || !body.trim()) return;
-      await supabase.from("chat_messages").insert({
+      const trimmed = body.trim();
+
+      // Optimistic bubble — appears instantly instead of waiting on the
+      // round trip to Postgres. Swapped for the real row (or rolled back)
+      // once the insert resolves.
+      const tempId = `temp-${crypto.randomUUID()}`;
+      const optimisticMessage: ChatMessage = {
+        id: tempId,
         room_id: roomId,
         sender_name: senderName,
-        body: body.trim(),
-      });
+        body: trimmed,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, optimisticMessage]);
+
+      const { data, error } = await supabase
+        .from("chat_messages")
+        .insert({ room_id: roomId, sender_name: senderName, body: trimmed })
+        .select()
+        .single();
+
+      if (error || !data) {
+        setMessages((prev) => prev.filter((m) => m.id !== tempId));
+        return;
+      }
+
+      // Swap in the server row (real id) so the realtime INSERT handler's
+      // existing dedupe check works when that event arrives moments later,
+      // instead of producing a duplicate bubble.
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? (data as ChatMessage) : m)));
     },
     [roomId]
   );
