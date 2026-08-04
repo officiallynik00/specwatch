@@ -16,6 +16,8 @@ const MOVIE_BUCKET = process.env.NEXT_PUBLIC_MOVIE_BUCKET || "movies";
 interface VideoPlayerProps {
   room: Room;
   myName: string;
+  // True only for the room's host — see useRoomSync. Gates play/seek/skip.
+  // Pause is universal (see handlePlayPauseClick) and works for anyone.
   isController: boolean;
   connectionStatus: ConnectionStatus;
   partnerName: string | null;
@@ -25,7 +27,6 @@ interface VideoPlayerProps {
   broadcastPause: (t: number) => void;
   broadcastSeek: (t: number) => void;
   broadcastHeartbeat: (t: number, playing: boolean) => void;
-  takeController: () => void;
   onEmoji: (emoji: string, by: string) => void;
   chatMessages: ChatMessage[];
   onSendChat: (body: string) => void;
@@ -53,7 +54,6 @@ export default function VideoPlayer({
   broadcastPause,
   broadcastSeek,
   broadcastHeartbeat,
-  takeController,
   onEmoji,
   chatMessages,
   onSendChat,
@@ -160,12 +160,6 @@ export default function VideoPlayer({
         video.currentTime = target;
         break;
       }
-      case "controller-change": {
-        if (lastEvent.controllerName !== myName) {
-          showNote(`${lastEvent.controllerName} now has the remote`);
-        }
-        break;
-      }
       case "emoji": {
         onEmoji(lastEvent.emoji, lastEvent.by);
         break;
@@ -255,7 +249,7 @@ export default function VideoPlayer({
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
-      if (!isController) return; // followers can't start playback
+      if (!isController) return; // only the host can start playback
       video.play().catch(() => {});
       broadcastPlay(video.currentTime);
     } else {
@@ -349,10 +343,10 @@ export default function VideoPlayer({
     if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
     const ms = navigator.mediaSession;
 
-    ms.setActionHandler("play", () => handlePlayPauseClick());
+    // Anyone can pause from the lock screen (universal pause). Resuming,
+    // seeking, and skipping are host-only, same as the on-screen controls.
+    ms.setActionHandler("play", isController ? () => handlePlayPauseClick() : null);
     ms.setActionHandler("pause", () => handlePlayPauseClick());
-    // Seeking from the lock screen only makes sense for the controller —
-    // a follower's seek would just get overwritten by the next heartbeat.
     ms.setActionHandler("seekbackward", isController ? () => handleSkip(-10) : null);
     ms.setActionHandler("seekforward", isController ? () => handleSkip(10) : null);
     ms.setActionHandler(
@@ -439,7 +433,7 @@ export default function VideoPlayer({
 
         {!isController && (
           <div className="absolute bottom-3 right-3 rounded-full bg-black/60 px-3 py-1 text-xs text-reel-muted backdrop-blur">
-            {room.controller_name ?? "Your partner"} has the remote
+            {room.host_name ?? "Your host"} has the remote
           </div>
         )}
 
@@ -515,6 +509,13 @@ export default function VideoPlayer({
             onClick={handlePlayPauseClick}
             disabled={!isPlaying && !isController}
             aria-label={isPlaying ? "Pause" : "Play"}
+            title={
+              !isController
+                ? isPlaying
+                  ? "Pause (anyone can pause)"
+                  : `Only ${room.host_name ?? "the host"} can start playback`
+                : undefined
+            }
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-reel-amber text-reel-bg transition disabled:cursor-not-allowed disabled:bg-reel-border disabled:text-reel-muted"
           >
             {isPlaying ? "❚❚" : "▶"}
@@ -555,13 +556,11 @@ export default function VideoPlayer({
           />
           <span className="font-mono text-xs text-reel-muted">{formatTime(duration)}</span>
 
-          <button
-            onClick={takeController}
-            disabled={isController}
-            className="ml-1 shrink-0 rounded-full border border-reel-border px-3 py-1.5 text-xs text-reel-muted transition hover:border-reel-amber hover:text-reel-amber disabled:cursor-default disabled:opacity-40"
-          >
-            {isController ? "You have the remote" : "Take the remote"}
-          </button>
+          {!isController && (
+            <span className="ml-1 shrink-0 rounded-full border border-reel-border px-3 py-1.5 text-xs text-reel-muted">
+              {room.host_name ?? "Host"} controls playback
+            </span>
+          )}
         </div>
       )}
     </div>
