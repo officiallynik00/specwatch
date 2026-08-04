@@ -26,6 +26,13 @@ const config: Config = {
         grain: "radial-gradient(circle at 20% 20%, rgba(232,165,72,0.06), transparent 45%), radial-gradient(circle at 80% 60%, rgba(232,99,122,0.05), transparent 40%)",
       },
       keyframes: {
+        chatFloat: {
+    "0%": { opacity: "0", transform: "translateY(6px)" },
+    "8%": { opacity: "1", transform: "translateY(0)" },
+    "82%": { opacity: "1" },
+    "100%": { opacity: "0", transform: "translateY(-4px)" },
+
+},
         floatUp: {
           "0%": { transform: "translateY(0) scale(0.8)", opacity: "0" },
           "10%": { opacity: "1", transform: "translateY(-10px) scale(1)" },
@@ -42,6 +49,9 @@ const config: Config = {
         },
       },
       animation: {
+         
+  // ...existing floatUp, pulseGlow, slideUp...
+        chatFloat: "chatFloat 5s ease-out forwards",
         floatUp: "floatUp 2s ease-out forwards",
         pulseGlow: "pulseGlow 2s ease-in-out infinite",
         slideUp: "slideUp 0.25s ease-out forwards",
