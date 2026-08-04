@@ -200,3 +200,5 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
 
   return { movies, loading, uploading, progress, error, addMovie, removeMovie };
 }
+
+export default useMovieLibrary;
