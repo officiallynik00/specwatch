@@ -6,6 +6,7 @@ export interface FloatingBubble {
   id: string;
   emoji: string;
   left: number; // percent, 0-100
+  count?: number; // >1 when rapid taps/reactions got batched into one burst
 }
 
 interface EmojiOverlayProps {
@@ -23,10 +24,15 @@ export default function EmojiOverlay({ bubbles, onRemove, onTap }: EmojiOverlayP
           <span
             key={b.id}
             onAnimationEnd={() => onRemove(b.id)}
-            className="absolute bottom-16 animate-floatUp text-4xl drop-shadow-lg"
+            className="absolute bottom-16 flex animate-floatUp items-end gap-0.5 text-4xl drop-shadow-lg"
             style={{ left: `${b.left}%` }}
           >
             {b.emoji}
+            {b.count && b.count > 1 && (
+              <span className="mb-1 rounded-full bg-black/60 px-1.5 py-0.5 text-xs font-bold text-reel-text">
+                ×{b.count}
+              </span>
+            )}
           </span>
         ))}
       </div>
