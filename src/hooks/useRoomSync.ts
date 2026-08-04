@@ -16,19 +16,29 @@ export type ConnectionStatus =
 interface UseRoomSyncOptions {
   roomCode: string;
   myName: string;
+  // Only the lobby screen passes true. Handles the rare case of a room
+  // row created before `host_name` existed (or created some other way)
+  // by letting the first person who lands in the lobby claim the host
+  // seat. Ordinary rooms already have host_name set at creation time, so
+  // this is just a safety net, not the primary way hosts get assigned.
+  claimHostIfUnset?: boolean;
 }
 
 /**
  * Owns the room's realtime channel: presence (who's here), the
  * broadcast stream for high-frequency sync events (heartbeat, play,
- * pause, seek, controller handoff, emoji), and light persistence of
- * playback position back to the `rooms` row.
+ * pause, seek, emoji), and light persistence of playback position back
+ * to the `rooms` row.
+ *
+ * Control is fixed: whoever created the room is `host_name` on the row,
+ * and that never changes hands mid-session. `isController` (and its
+ * alias `isHost`) both just mean "myName === room.host_name".
  *
  * The actual <video> element lives in VideoPlayer — this hook just
  * hands it events to react to via `lastEvent`, and functions to
  * announce local actions.
  */
-export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
+export function useRoomSync({ roomCode, myName, claimHostIfUnset = false }: UseRoomSyncOptions) {
   const [room, setRoom] = useState<Room | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastEvent, setLastEvent] = useState<SyncEvent | null>(null);
@@ -44,9 +54,14 @@ export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
   const hasSubscribedOnceRef = useRef(false);
 
   const partnerName = presentNames.find((n) => n !== myName) ?? null;
-  const isController = room?.controller_name === myName;
+  const isHost = !!myName && room?.host_name === myName;
+  // Kept as `isController` too — it's the name VideoPlayer/PlayerScreen
+  // use, and "controller" is still an accurate word for what the host is
+  // doing; there's just no longer a way to become one other than being
+  // the host.
+  const isController = isHost;
 
-  // ── Initial load + row subscription (movie uploads, controller changes) ──
+  // ── Initial load + row subscription (movie uploads, host claim) ──
   useEffect(() => {
     let cancelled = false;
 
@@ -61,13 +76,12 @@ export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
       if (data) {
         setRoom(data as Room);
         roomIdRef.current = data.id;
-        // First person in becomes controller by default.
-        if (!data.controller_name) {
+        if (claimHostIfUnset && !data.host_name && myName) {
           await supabase
             .from("rooms")
-            .update({ controller_name: myName })
+            .update({ host_name: myName })
             .eq("id", data.id)
-            .is("controller_name", null);
+            .is("host_name", null);
         }
       }
       setLoading(false);
@@ -222,18 +236,13 @@ export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
     [broadcast, myName]
   );
 
-  const takeController = useCallback(async () => {
-    if (!roomIdRef.current) return;
-    await supabase.from("rooms").update({ controller_name: myName }).eq("id", roomIdRef.current);
-    broadcast({ type: "controller-change", controllerName: myName });
-  }, [broadcast, myName]);
-
   return {
     room,
     loading,
     lastEvent,
     presentNames,
     partnerName,
+    isHost,
     isController,
     connectionStatus,
     reconnectAttempts,
@@ -243,7 +252,6 @@ export function useRoomSync({ roomCode, myName }: UseRoomSyncOptions) {
     broadcastSeek,
     broadcastHeartbeat,
     sendEmoji,
-    takeController,
     persistPlaybackState,
   };
 }
