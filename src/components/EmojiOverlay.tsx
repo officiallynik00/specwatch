@@ -37,13 +37,13 @@ export default function EmojiOverlay({ bubbles, onRemove, onTap }: EmojiOverlayP
         ))}
       </div>
 
-      {/* Quick-tap reaction bar */}
-      <div className="mt-3 flex justify-center gap-2">
+      {/* Quick-tap reaction bar — wraps + tighter padding on narrow phones */}
+      <div className="mt-3 flex flex-wrap justify-center gap-1.5 sm:gap-2">
         {QUICK_EMOJIS.map((emoji) => (
           <button
             key={emoji}
             onClick={() => onTap(emoji)}
-            className="rounded-full border border-reel-border bg-reel-surface px-3 py-2 text-xl transition hover:scale-110 hover:border-reel-amber active:scale-95"
+            className="rounded-full border border-reel-border bg-reel-surface px-2.5 py-1.5 text-lg transition hover:scale-110 hover:border-reel-amber active:scale-95 sm:px-3 sm:py-2 sm:text-xl"
             aria-label={`React with ${emoji}`}
           >
             {emoji}
