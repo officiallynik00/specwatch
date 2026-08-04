@@ -84,15 +84,23 @@ export default function VideoPlayer({
     if (noteTimeoutRef.current) clearTimeout(noteTimeoutRef.current);
     noteTimeoutRef.current = setTimeout(() => setStatusNote(null), ms);
   }, []);
+  
 
   // ── Resume from last saved position once metadata is ready ──
-  const handleLoadedMetadata = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || initializedRef.current) return;
-    initializedRef.current = true;
-    video.currentTime = room.last_position_seconds || 0;
-    setDuration(video.duration || 0);
-  }, [room.last_position_seconds]);
+const handleLoadedMetadata = useCallback(() => {
+  const video = videoRef.current;
+  if (!video || initializedRef.current) return;
+  initializedRef.current = true;
+  video.currentTime = room.last_position_seconds || 0;
+  setDuration(video.duration || 0);
+}, [room.last_position_seconds]);
+
+  // Re-arm the "seek to saved position" logic whenever the room switches
+// to a different file — otherwise initializedRef stays true forever and
+// duration/seek state goes stale after the host picks a new movie.
+useEffect(() => {
+  initializedRef.current = false;
+}, [room.movie_path]);
 
   // ── Controller heartbeat loop ──
   useEffect(() => {
