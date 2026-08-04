@@ -5,6 +5,8 @@ import { supabase } from "@/lib/supabase/client";
 
 const MOVIE_BUCKET = process.env.NEXT_PUBLIC_MOVIE_BUCKET || "movies";
 const MAX_BYTES = 1024 * 1024 * 1024; // 1GB, matches the Supabase free-tier ceiling in the spec
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 interface MovieUploaderProps {
   roomId: string;
@@ -12,8 +14,51 @@ interface MovieUploaderProps {
   onUploaded: () => void;
 }
 
+/**
+ * Uploads directly to Supabase Storage's REST endpoint via XMLHttpRequest
+ * instead of supabase-js's `upload()` helper, purely to get real
+ * `xhr.upload.onprogress` events for a percentage bar — the JS client's
+ * fetch-based upload doesn't expose upload progress. This mirrors what the
+ * client does under the hood (POST with an upsert header). If your project
+ * has non-default storage policies, this is the one spot to double check
+ * against the network tab if uploads start failing here.
+ */
+function uploadWithProgress(
+  path: string,
+  file: File,
+  onProgress: (pct: number) => void
+): Promise<{ error?: string }> {
+  return new Promise((resolve) => {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      resolve({ error: "Supabase isn't configured — check your .env.local." });
+      return;
+    }
+    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+    const url = `${SUPABASE_URL}/storage/v1/object/${MOVIE_BUCKET}/${encodedPath}`;
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url, true);
+    xhr.setRequestHeader("Authorization", `Bearer ${SUPABASE_ANON_KEY}`);
+    xhr.setRequestHeader("apikey", SUPABASE_ANON_KEY);
+    xhr.setRequestHeader("x-upsert", "true");
+    xhr.setRequestHeader("cache-control", "3600");
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve({});
+      else resolve({ error: `Upload failed (status ${xhr.status})` });
+    };
+    xhr.onerror = () => resolve({ error: "Network error during upload." });
+    xhr.send(file);
+  });
+}
+
 export default function MovieUploader({ roomId, roomCode, onUploaded }: MovieUploaderProps) {
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
 
@@ -28,17 +73,16 @@ export default function MovieUploader({ roomId, roomCode, onUploaded }: MovieUpl
     }
 
     setUploading(true);
+    setProgress(0);
     setFileName(file.name);
 
     const ext = file.name.split(".").pop() || "mp4";
     const path = `${roomCode}/movie.${ext}`;
 
-    const { error: uploadError } = await supabase.storage
-      .from(MOVIE_BUCKET)
-      .upload(path, file, { upsert: true, cacheControl: "3600" });
+    const { error: uploadError } = await uploadWithProgress(path, file, setProgress);
 
     if (uploadError) {
-      setError(`Upload failed: ${uploadError.message}`);
+      setError(`Upload failed: ${uploadError}`);
       setUploading(false);
       return;
     }
@@ -68,7 +112,7 @@ export default function MovieUploader({ roomId, roomCode, onUploaded }: MovieUpl
       </p>
 
       <label className="inline-block cursor-pointer rounded-full bg-reel-amber px-5 py-2.5 text-sm font-medium text-reel-bg transition hover:bg-reel-amberDim">
-        {uploading ? "Uploading…" : "Choose file"}
+        {uploading ? `Uploading… ${progress}%` : "Choose file"}
         <input
           type="file"
           accept="video/mp4,video/*"
@@ -81,9 +125,18 @@ export default function MovieUploader({ roomId, roomCode, onUploaded }: MovieUpl
         />
       </label>
 
-      {fileName && !error && (
+      {uploading && (
+        <div className="mx-auto mt-4 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-reel-border">
+          <div
+            className="h-full rounded-full bg-reel-amber transition-[width] duration-200"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      )}
+
+      {fileName && !error && !uploading && (
         <p className="mt-3 text-xs text-reel-muted">
-          {uploading ? "Uploading" : "Uploaded"} <span className="text-reel-text">{fileName}</span>
+          Uploaded <span className="text-reel-text">{fileName}</span>
         </p>
       )}
       {error && <p className="mt-3 text-sm text-reel-rose">{error}</p>}
