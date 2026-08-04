@@ -151,7 +151,9 @@ export default function PlayerScreen() {
           <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-reel-amber">
             room {code}
           </p>
-          <h1 className="font-display text-xl italic text-reel-text">{sync.room.movie_title}</h1>
+          <h1 className="max-w-[60vw] truncate font-display text-lg italic text-reel-text sm:max-w-none sm:text-xl">
+            {sync.room.movie_title}
+          </h1>
         </div>
         <ConnectionStatus status={sync.connectionStatus} />
       </header>
