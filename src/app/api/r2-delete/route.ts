@@ -1,20 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
 
-const r2 = new S3Client({
-  region: "auto",
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+const b2 = new S3Client({
+  region: "us-east-005",
+  endpoint: "https://s3.us-east-005.backblazeb2.com",
   credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+    accessKeyId: process.env.B2_KEY_ID!,
+    secretAccessKey: process.env.B2_APPLICATION_KEY!,
   },
 });
 
-const BUCKET = process.env.R2_BUCKET_NAME!;
+const BUCKET = process.env.B2_BUCKET_NAME!;
 
 export async function POST(req: NextRequest) {
-  if (!process.env.R2_ACCOUNT_ID || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY || !BUCKET) {
-    return NextResponse.json({ error: "R2 isn't configured on the server." }, { status: 500 });
+  if (!process.env.B2_KEY_ID || !process.env.B2_APPLICATION_KEY || !BUCKET) {
+    return NextResponse.json({ error: "B2 isn't configured on the server." }, { status: 500 });
   }
 
   let body: { path?: string };
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: path }));
+    await b2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: path }));
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(
