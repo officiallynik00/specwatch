@@ -1,45 +1,45 @@
--- Watch Party — Supabase schema
--- Run this in the Supabase SQL Editor (Project -> SQL Editor -> New query) once,
--- on a fresh project. Safe to re-run (uses IF NOT EXISTS / OR REPLACE).
+-- Watch Party — idempotent fix-up migration
+-- Safe to run on a brand-new project, or one that already ran the old
+-- schema.sql (with controller_name and no movies table). Re-runnable.
 
--- ─────────────────────────────────────────────────────────────
--- Extensions
--- ─────────────────────────────────────────────────────────────
 create extension if not exists "pgcrypto";
 
--- ─────────────────────────────────────────────────────────────
--- Rooms
--- One row per watch-party room. Holds movie reference + shared
--- playback state (the "ground truth" the sync logic reads/writes).
--- ─────────────────────────────────────────────────────────────
+-- ── rooms: create if missing, using host_name from the start ──
 create table if not exists rooms (
   id uuid primary key default gen_random_uuid(),
-  code text not null unique,                 -- short shareable room code, e.g. "PLUM-4821"
+  code text not null unique,
   created_at timestamptz not null default now(),
-
-  -- Movie
-  movie_path text,                           -- path inside the storage bucket
+  movie_path text,
   movie_title text,
   movie_uploaded_at timestamptz,
-
-  -- Shared playback / control state
-  controller_name text,                      -- name of the person who currently holds "the remote"
+  host_name text,
   is_playing boolean not null default false,
   last_position_seconds double precision not null default 0,
   last_heartbeat_at timestamptz not null default now(),
-
-  -- Fun stat
   total_watch_seconds double precision not null default 0
 );
 
+-- If rooms already existed with the old column name, rename it in place.
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_name = 'rooms' and column_name = 'controller_name'
+  ) and not exists (
+    select 1 from information_schema.columns
+    where table_name = 'rooms' and column_name = 'host_name'
+  ) then
+    alter table rooms rename column controller_name to host_name;
+  end if;
+end $$;
+
+-- In case some earlier partial run created host_name as NOT NULL or the
+-- column simply doesn't exist yet under either name.
+alter table rooms add column if not exists host_name text;
+
 create index if not exists rooms_code_idx on rooms (code);
 
--- ─────────────────────────────────────────────────────────────
--- Chat messages
--- Persistent log per room. Emoji reactions are NOT stored here —
--- they're ephemeral and travel only over the realtime broadcast
--- channel (see src/hooks/useRoomSync.ts), by design.
--- ─────────────────────────────────────────────────────────────
+-- ── chat_messages ──
 create table if not exists chat_messages (
   id uuid primary key default gen_random_uuid(),
   room_id uuid not null references rooms (id) on delete cascade,
@@ -50,16 +50,22 @@ create table if not exists chat_messages (
 
 create index if not exists chat_messages_room_id_idx on chat_messages (room_id, created_at);
 
--- ─────────────────────────────────────────────────────────────
--- Row Level Security
--- MVP note: rooms are protected only by an unguessable code, matching
--- the "no heavy auth" decision in the spec. Anyone with the anon key
--- can read/write — that's acceptable for a private 2-person link, but
--- revisit before opening this up to strangers (see spec's Future
--- Considerations section).
--- ─────────────────────────────────────────────────────────────
+-- ── movies (new table — the persistent per-room library) ──
+create table if not exists movies (
+  id uuid primary key default gen_random_uuid(),
+  room_id uuid not null references rooms (id) on delete cascade,
+  storage_path text not null,
+  title text not null,
+  file_size_bytes bigint,
+  uploaded_at timestamptz not null default now()
+);
+
+create index if not exists movies_room_id_idx on movies (room_id, uploaded_at desc);
+
+-- ── RLS ──
 alter table rooms enable row level security;
 alter table chat_messages enable row level security;
+alter table movies enable row level security;
 
 drop policy if exists "rooms are readable by anyone with the anon key" on rooms;
 create policy "rooms are readable by anyone with the anon key"
@@ -81,18 +87,44 @@ drop policy if exists "chat is insertable by anyone with the anon key" on chat_m
 create policy "chat is insertable by anyone with the anon key"
   on chat_messages for insert with check (true);
 
--- ─────────────────────────────────────────────────────────────
--- Realtime
--- Broadcast changes to rooms + chat_messages so every client in
--- the room sees state changes without polling.
--- ─────────────────────────────────────────────────────────────
-alter publication supabase_realtime add table rooms;
-alter publication supabase_realtime add table chat_messages;
+drop policy if exists "movies are readable by anyone with the anon key" on movies;
+create policy "movies are readable by anyone with the anon key"
+  on movies for select using (true);
 
--- ─────────────────────────────────────────────────────────────
--- Storage bucket for movie files
--- 1GB free-tier ceiling per the spec's storage decisions.
--- ─────────────────────────────────────────────────────────────
+drop policy if exists "movies are insertable by anyone with the anon key" on movies;
+create policy "movies are insertable by anyone with the anon key"
+  on movies for insert with check (true);
+
+drop policy if exists "movies are deletable by anyone with the anon key" on movies;
+create policy "movies are deletable by anyone with the anon key"
+  on movies for delete using (true);
+
+-- ── Realtime — guard against "table is already a member" errors ──
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and tablename = 'rooms'
+  ) then
+    alter publication supabase_realtime add table rooms;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and tablename = 'chat_messages'
+  ) then
+    alter publication supabase_realtime add table chat_messages;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and tablename = 'movies'
+  ) then
+    alter publication supabase_realtime add table movies;
+  end if;
+end $$;
+
+-- ── Storage bucket ──
 insert into storage.buckets (id, name, public)
 values ('movies', 'movies', true)
 on conflict (id) do nothing;
