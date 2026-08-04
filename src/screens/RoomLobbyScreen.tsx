@@ -23,8 +23,28 @@ export default function RoomLobbyScreen() {
     setName(sessionStorage.getItem("watchparty:name"));
   }, []);
 
-  const { room, loading, connectionStatus } = useRoomSync({ roomCode: code, myName: name ?? "" });
+  // claimHostIfUnset: true — this is the lobby, so if we somehow land
+  // here on a room row with no host set yet (legacy row, or a link
+  // opened before the create-room insert included host_name), we grab
+  // it. Normal rooms already have host_name set at creation and this is
+  // a no-op for them.
+  const { room, loading, connectionStatus, isHost } = useRoomSync({
+    roomCode: code,
+    myName: name ?? "",
+    claimHostIfUnset: true,
+  });
   const library = useMovieLibrary({ roomId: room?.id ?? null, roomCode: code });
+
+  // This screen (code, invite link, movie library) is host-only. A
+  // visitor doesn't manage the library — they just watch — so as soon as
+  // we know they're not the host, send them straight to the player,
+  // which handles the "no movie loaded yet" waiting state on its own.
+  useEffect(() => {
+    if (!name || loading || !room) return;
+    if (!isHost) {
+      router.replace(`/room/${code}/player`);
+    }
+  }, [name, loading, room, isHost, router, code]);
 
   function confirmName(e: React.FormEvent) {
     e.preventDefault();
@@ -43,9 +63,10 @@ export default function RoomLobbyScreen() {
 
   // Loads a library item into the room's shared playback state — the
   // pointer both VideoPlayer instances read — then heads into the
-  // player. A partner still on the lobby picks up the change via the
-  // room row's postgres_changes subscription in useRoomSync and sees
-  // the "Now loaded" card update on their side too.
+  // player. The visitor, already sitting on their own player screen,
+  // picks up the change via the room row's postgres_changes subscription
+  // in useRoomSync and transitions out of the "waiting for host" state
+  // automatically.
   async function playMovie(movie: Movie) {
     if (!room || entering) return;
     setEntering(true);
@@ -120,11 +141,20 @@ export default function RoomLobbyScreen() {
     );
   }
 
+  if (!isHost) {
+    // Redirecting to the player — see the effect above.
+    return (
+      <main className="flex min-h-dvh items-center justify-center text-reel-muted">
+        Joining the room…
+      </main>
+    );
+  }
+
   return (
     <main className="flex min-h-dvh flex-col items-center gap-6 px-6 py-16">
       <div className="w-full max-w-md text-center">
         <p className="mb-2 font-mono text-xs uppercase tracking-[0.3em] text-reel-amber">
-          room ready
+          room ready · you're the host
         </p>
         <h1 className="mb-1 font-display text-3xl italic text-reel-text">{code}</h1>
         <p className="mb-4 text-sm text-reel-muted">Hi {name} — send this code or link to your partner.</p>
