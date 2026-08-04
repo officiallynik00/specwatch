@@ -18,12 +18,32 @@ function formatClock(iso: string): string {
 export default function ChatDrawer({ open, onToggle, messages, myName, onSend }: ChatDrawerProps) {
   const [draft, setDraft] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
+  const lastSeenIdRef = useRef<string | null>(null);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
     if (open && listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages, open]);
+
+  // Mark everything as read whenever the drawer is open.
+  useEffect(() => {
+    if (!open) return;
+    lastSeenIdRef.current = messages[messages.length - 1]?.id ?? null;
+    setUnreadCount(0);
+  }, [open, messages]);
+
+  // While closed, count partner messages that arrived since we last had
+  // the drawer open.
+  useEffect(() => {
+    if (open) return;
+    const lastSeenIndex = lastSeenIdRef.current
+      ? messages.findIndex((m) => m.id === lastSeenIdRef.current)
+      : -1;
+    const newFromPartner = messages.slice(lastSeenIndex + 1).filter((m) => m.sender_name !== myName);
+    setUnreadCount(newFromPartner.length);
+  }, [messages, open, myName]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,6 +60,11 @@ export default function ChatDrawer({ open, onToggle, messages, myName, onSend }:
         aria-label={open ? "Close chat" : "Open chat"}
       >
         💬
+        {!open && unreadCount > 0 && (
+          <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-reel-rose px-1 text-[10px] font-bold text-white">
+            {unreadCount > 9 ? "9+" : unreadCount}
+          </span>
+        )}
       </button>
 
       {open && (
@@ -59,6 +84,7 @@ export default function ChatDrawer({ open, onToggle, messages, myName, onSend }:
             )}
             {messages.map((m) => {
               const mine = m.sender_name === myName;
+              const pending = m.id.startsWith("temp-");
               return (
                 <div key={m.id} className={`flex flex-col ${mine ? "items-end" : "items-start"}`}>
                   <div
@@ -66,12 +92,12 @@ export default function ChatDrawer({ open, onToggle, messages, myName, onSend }:
                       mine
                         ? "rounded-br-sm bg-reel-amber text-reel-bg"
                         : "rounded-bl-sm bg-reel-surface2 text-reel-text"
-                    }`}
+                    } ${pending ? "opacity-60" : ""}`}
                   >
                     {m.body}
                   </div>
                   <span className="mt-1 px-1 text-[10px] text-reel-muted">
-                    {mine ? "You" : m.sender_name} · {formatClock(m.created_at)}
+                    {mine ? "You" : m.sender_name} · {pending ? "Sending…" : formatClock(m.created_at)}
                   </span>
                 </div>
               );
