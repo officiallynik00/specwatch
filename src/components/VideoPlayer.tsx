@@ -11,7 +11,6 @@ const LARGE_DRIFT_THRESHOLD = 1.5; // seconds — hard resync + visible status
 const NUDGE_RATE_FAST = 1.06; // used when we're behind the controller
 const NUDGE_RATE_SLOW = 0.94; // used when we're ahead of the controller
 
-const MOVIE_BUCKET = process.env.NEXT_PUBLIC_MOVIE_BUCKET || "movies";
 
 interface VideoPlayerProps {
   room: Room;
@@ -76,10 +75,6 @@ export default function VideoPlayer({
   const noteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bufferAutoPausedRef = useRef(false);
   const fsControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const movieUrl = room.movie_path
-    ? supabase.storage.from(MOVIE_BUCKET).getPublicUrl(room.movie_path).data.publicUrl
-    : null;
 
   const showNote = useCallback((text: string, ms = 2500) => {
     setStatusNote(text);
