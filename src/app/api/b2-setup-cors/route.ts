@@ -4,9 +4,6 @@ const BUCKET_ID = "4abfd2b107d4cbe99dff0b14";
 
 export async function GET() {
   try {
-    // Step 1: authenticate against the B2 Native API using Basic auth
-    // (keyID:applicationKey), which is different from how the S3-compatible
-    // client authenticates.
     const authRes = await fetch("https://api.backblazeb2.com/b2api/v3/b2_authorize_account", {
       headers: {
         Authorization:
@@ -19,18 +16,23 @@ export async function GET() {
       return NextResponse.json({ error: "Auth failed", detail: auth }, { status: 500 });
     }
 
-    // Step 2: update the bucket's CORS rules via the Native API, using
-    // s3_* operation names so the rule also covers S3-compatible requests
-    // (this is documented B2 behavior — one native-format rule can list
-    // both b2_* and s3_* operations).
-    const updateRes = await fetch(`${auth.apiUrl}/b2api/v3/b2_update_bucket`, {
+    // v3 nests these under apiInfo.storageApi, not at the top level.
+    const apiUrl = auth.apiInfo?.storageApi?.apiUrl;
+    const authToken = auth.authorizationToken;
+    const accountId = auth.accountId;
+
+    if (!apiUrl || !authToken) {
+      return NextResponse.json({ error: "Unexpected auth response shape", detail: auth }, { status: 500 });
+    }
+
+    const updateRes = await fetch(`${apiUrl}/b2api/v3/b2_update_bucket`, {
       method: "POST",
       headers: {
-        Authorization: auth.authorizationToken,
+        Authorization: authToken,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        accountId: auth.accountId,
+        accountId,
         bucketId: BUCKET_ID,
         corsRules: [
           {
