@@ -77,6 +77,12 @@ export default function VideoPlayer({
   const fsControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [movieUrl, setMovieUrl] = useState<string | null>(null);
+  
+  const showNote = useCallback((text: string, ms = 2500) => {
+    setStatusNote(text);
+    if (noteTimeoutRef.current) clearTimeout(noteTimeoutRef.current);
+    noteTimeoutRef.current = setTimeout(() => setStatusNote(null), ms);
+  }, []);
 
 useEffect(() => {
   if (!room.movie_path) {
@@ -108,11 +114,7 @@ useEffect(() => {
   };
 }, [room.movie_path, showNote]);
 
-  const showNote = useCallback((text: string, ms = 2500) => {
-    setStatusNote(text);
-    if (noteTimeoutRef.current) clearTimeout(noteTimeoutRef.current);
-    noteTimeoutRef.current = setTimeout(() => setStatusNote(null), ms);
-  }, []);
+  
 
   const wakeFsControls = useCallback(() => {
     setFsControlsVisible(true);
