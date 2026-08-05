@@ -14,7 +14,9 @@ export default function PlayerScreen() {
   const code = decodeURIComponent(params.code).toUpperCase();
   const router = useRouter();
 
-  const [name, setName] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [nameChecked, setNameChecked] = useState(false);
+  
   const [chatOpen, setChatOpen] = useState(false);
   const [bubbles, setBubbles] = useState<FloatingBubble[]>([]);
   const [justLoadedNotice, setJustLoadedNotice] = useState(false);
@@ -22,7 +24,8 @@ export default function PlayerScreen() {
   const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    setName(sessionStorage.getItem("watchparty:name"));
+    setName(sessionStorage.getItem("watchparty:name") ?? "");
+    setNameChecked(true);
   }, []);
 
   const sync = useRoomSync({ roomCode: code, myName: name ?? "" });
@@ -85,7 +88,7 @@ export default function PlayerScreen() {
     [name, sendMessage]
   );
 
-  if (name === null) return null;
+  if (!nameChecked) return null;
 
   if (!name) {
     router.replace(`/room/${code}`);
