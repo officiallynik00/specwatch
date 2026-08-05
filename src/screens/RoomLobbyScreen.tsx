@@ -86,7 +86,7 @@ export default function RoomLobbyScreen() {
     if (!error) router.push(`/room/${code}/player`);
   }
 
-  if (name === null) {
+  if (!nameChecked) {
     // Waiting on the sessionStorage check on mount.
     return null;
   }
