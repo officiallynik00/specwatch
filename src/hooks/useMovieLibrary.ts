@@ -2,36 +2,21 @@ import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import type { Movie } from "@/lib/types";
 
-const MOVIE_BUCKET = process.env.NEXT_PUBLIC_MOVIE_BUCKET || "movies";
-const MAX_BYTES = 1024 * 1024 * 1024; // 1GB, matches the Supabase free-tier ceiling
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5GB — well under B2's 10GB free-tier storage cap
 
 /**
- * Uploads directly to Supabase Storage's REST endpoint via XMLHttpRequest
- * instead of supabase-js's `upload()` helper, purely to get real
- * `xhr.upload.onprogress` events for a percentage bar — the JS client's
- * fetch-based upload doesn't expose upload progress.
+ * Uploads to B2 via a presigned PUT URL obtained from our own /api/r2-upload-url
+ * route. We use XMLHttpRequest instead of fetch purely to get real
+ * `xhr.upload.onprogress` events for a percentage bar.
  */
 function uploadWithProgress(
-  path: string,
+  url: string,
   file: File,
   onProgress: (pct: number) => void
 ): Promise<{ error?: string }> {
   return new Promise((resolve) => {
-    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-      resolve({ error: "Supabase isn't configured — check your .env.local." });
-      return;
-    }
-    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-    const url = `${SUPABASE_URL}/storage/v1/object/${MOVIE_BUCKET}/${encodedPath}`;
-
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", url, true);
-    xhr.setRequestHeader("Authorization", `Bearer ${SUPABASE_ANON_KEY}`);
-    xhr.setRequestHeader("apikey", SUPABASE_ANON_KEY);
-    xhr.setRequestHeader("x-upsert", "true");
-    xhr.setRequestHeader("cache-control", "3600");
+    xhr.open("PUT", url, true);
     xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
 
     xhr.upload.onprogress = (e) => {
@@ -55,9 +40,9 @@ interface UseMovieLibraryOptions {
  * Owns a room's persistent movie library: every file ever uploaded to
  * this room, independent of whichever one happens to be loaded into
  * the shared player right now (that pointer lives on the `rooms` row
- * itself — see useRoomSync). Backed by the `movies` table plus the
- * shared `movies` storage bucket, with realtime INSERT/DELETE so both
- * partners always see the same shelf.
+ * itself — see useRoomSync). File bytes live in B2 (see /api/r2-upload-url,
+ * /api/r2-play-url, /api/r2-delete); metadata lives in the `movies` table
+ * with realtime INSERT/DELETE so both partners always see the same shelf.
  */
 export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
   const [movies, setMovies] = useState<Movie[]>([]);
@@ -115,8 +100,12 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       setError(null);
       if (file.size > MAX_BYTES) {
         setError(
-          `That file is ${(file.size / 1024 / 1024 / 1024).toFixed(2)}GB — over the 1GB free-tier ` +
-            "limit. Compress to 480p first, or upgrade to Supabase Pro for more room."
+          `That file is ${(file.size / 1024 / 1024 / 1024).toFixed(2)}GB — over the ${(
+            MAX_BYTES /
+            1024 /
+            1024 /
+            1024
+          ).toFixed(0)}GB limit. Compress it first.`
         );
         return;
       }
@@ -131,7 +120,29 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       const ext = file.name.split(".").pop() || "mp4";
       const path = `${roomCode}/${movieId}.${ext}`;
 
-      const { error: uploadError } = await uploadWithProgress(path, file, setProgress);
+      // Ask our server for a presigned PUT URL, then upload straight to
+      // B2 with it — the file never passes through our own server.
+      let signedUrl: string;
+      try {
+        const res = await fetch("/api/r2-upload-url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path, contentType: file.type || "application/octet-stream" }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.url) {
+          setError(`Couldn't start the upload: ${data.error || "unknown error"}`);
+          setUploading(false);
+          return;
+        }
+        signedUrl = data.url;
+      } catch {
+        setError("Couldn't reach the server to start the upload.");
+        setUploading(false);
+        return;
+      }
+
+      const { error: uploadError } = await uploadWithProgress(signedUrl, file, setProgress);
       if (uploadError) {
         setError(`Upload failed: ${uploadError}`);
         setUploading(false);
@@ -173,9 +184,18 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       // Optimistic removal — the storage/db calls happen after.
       setMovies((prev) => prev.filter((m) => m.id !== movie.id));
 
-      const { error: storageError } = await supabase.storage.from(MOVIE_BUCKET).remove([movie.storage_path]);
-      if (storageError) {
-        setError(`Couldn't remove the file from storage: ${storageError.message}`);
+      try {
+        const res = await fetch("/api/r2-delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: movie.storage_path }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setError(`Couldn't remove the file from storage: ${data.error || "unknown error"}`);
+        }
+      } catch {
+        setError("Couldn't reach the server to remove the file from storage.");
       }
 
       const { error: deleteError } = await supabase.from("movies").delete().eq("id", movie.id);
