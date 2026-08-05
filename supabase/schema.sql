@@ -148,3 +148,11 @@ drop policy if exists "movie files are deletable by anyone with the anon key" on
 create policy "movie files are deletable by anyone with the anon key"
   on storage.objects for delete
   using (bucket_id = 'movies');
+
+alter table movies alter column room_id drop not null;
+alter table movies drop constraint if exists movies_room_id_fkey;
+alter table movies add constraint movies_room_id_fkey
+  foreign key (room_id) references rooms (id) on delete set null;
+
+drop index if exists movies_room_id_idx;
+create index if not exists movies_uploaded_at_idx on movies (uploaded_at desc);
