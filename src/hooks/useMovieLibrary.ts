@@ -37,12 +37,13 @@ interface UseMovieLibraryOptions {
 }
 
 /**
- * Owns a room's persistent movie library: every file ever uploaded to
- * this room, independent of whichever one happens to be loaded into
- * the shared player right now (that pointer lives on the `rooms` row
- * itself — see useRoomSync). File bytes live in B2 (see /api/r2-upload-url,
- * /api/r2-play-url, /api/r2-delete); metadata lives in the `movies` table
- * with realtime INSERT/DELETE so both partners always see the same shelf.
+ * Owns the global movie library: every file ever uploaded, from any room,
+ * by anyone — not scoped to whichever room happens to be open right now.
+ * A room's *currently playing* movie (room.movie_path on the `rooms` row —
+ * see useRoomSync) is a separate, per-room pointer into this shared shelf.
+ * File bytes live in B2 (see /api/r2-upload-url, /api/r2-play-url,
+ * /api/r2-delete); metadata lives in the `movies` table with realtime
+ * INSERT/DELETE so every room sees the same shelf update instantly.
  */
 export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
   const [movies, setMovies] = useState<Movie[]>([]);
@@ -52,14 +53,12 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!roomId) return;
     let cancelled = false;
 
     async function load() {
       const { data } = await supabase
         .from("movies")
         .select("*")
-        .eq("room_id", roomId)
         .order("uploaded_at", { ascending: false });
       if (!cancelled && data) setMovies(data as Movie[]);
       setLoading(false);
@@ -67,10 +66,10 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
     load();
 
     const sub = supabase
-      .channel(`movies-${roomId}`)
+      .channel("movies-global")
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "movies", filter: `room_id=eq.${roomId}` },
+        { event: "INSERT", schema: "public", table: "movies" },
         (payload) => {
           setMovies((prev) => {
             const incoming = payload.new as Movie;
@@ -81,7 +80,7 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       )
       .on(
         "postgres_changes",
-        { event: "DELETE", schema: "public", table: "movies", filter: `room_id=eq.${roomId}` },
+        { event: "DELETE", schema: "public", table: "movies" },
         (payload) => {
           const removedId = (payload.old as Partial<Movie>).id;
           setMovies((prev) => prev.filter((m) => m.id !== removedId));
@@ -93,7 +92,7 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       cancelled = true;
       supabase.removeChannel(sub);
     };
-  }, [roomId]);
+  }, []);
 
   const addMovie = useCallback(
     async (file: File) => {
@@ -109,13 +108,12 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
         );
         return;
       }
-      if (!roomId) return;
 
       setUploading(true);
       setProgress(0);
 
       // Unique path per movie (not a fixed "movie.ext") since the
-      // library can hold more than one file per room.
+      // library can hold more than one file, from any room.
       const movieId = crypto.randomUUID();
       const ext = file.name.split(".").pop() || "mp4";
       const path = `${roomCode}/${movieId}.${ext}`;
@@ -150,6 +148,9 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       }
 
       const title = file.name.replace(/\.[^/.]+$/, "");
+      // room_id is kept only as a breadcrumb of which room the upload
+      // happened in — it's nullable now and never used to filter the
+      // library, which is intentionally global.
       const { data, error: insertError } = await supabase
         .from("movies")
         .insert({
@@ -178,45 +179,39 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
     [roomId, roomCode]
   );
 
-  const removeMovie = useCallback(
-    async (movie: Movie) => {
-      setError(null);
-      // Optimistic removal — the storage/db calls happen after.
-      setMovies((prev) => prev.filter((m) => m.id !== movie.id));
+  const removeMovie = useCallback(async (movie: Movie) => {
+    setError(null);
+    // Optimistic removal — the storage/db calls happen after.
+    setMovies((prev) => prev.filter((m) => m.id !== movie.id));
 
-      try {
-        const res = await fetch("/api/r2-delete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: movie.storage_path }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          setError(`Couldn't remove the file from storage: ${data.error || "unknown error"}`);
-        }
-      } catch {
-        setError("Couldn't reach the server to remove the file from storage.");
+    try {
+      const res = await fetch("/api/r2-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: movie.storage_path }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(`Couldn't remove the file from storage: ${data.error || "unknown error"}`);
       }
+    } catch {
+      setError("Couldn't reach the server to remove the file from storage.");
+    }
 
-      const { error: deleteError } = await supabase.from("movies").delete().eq("id", movie.id);
-      if (deleteError) {
-        setError(`Couldn't remove "${movie.title}" from the library: ${deleteError.message}`);
-        return;
-      }
+    const { error: deleteError } = await supabase.from("movies").delete().eq("id", movie.id);
+    if (deleteError) {
+      setError(`Couldn't remove "${movie.title}" from the library: ${deleteError.message}`);
+      return;
+    }
 
-      // If this was the room's currently-loaded movie, clear the pointer
-      // so a partner still on the lobby (or mid-heartbeat) doesn't try to
-      // play a file that no longer exists.
-      if (roomId) {
-        await supabase
-          .from("rooms")
-          .update({ movie_path: null, movie_title: null, movie_uploaded_at: null })
-          .eq("id", roomId)
-          .eq("movie_path", movie.storage_path);
-      }
-    },
-    [roomId]
-  );
+    // Any room that currently has this movie loaded as "now playing"
+    // should clear its pointer — not just the room it was uploaded in,
+    // since the library (and therefore playback) is global now.
+    await supabase
+      .from("rooms")
+      .update({ movie_path: null, movie_title: null, movie_uploaded_at: null })
+      .eq("movie_path", movie.storage_path);
+  }, []);
 
   return { movies, loading, uploading, progress, error, addMovie, removeMovie };
 }
