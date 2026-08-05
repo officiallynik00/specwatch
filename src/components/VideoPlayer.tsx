@@ -70,6 +70,14 @@ export default function VideoPlayer({
   const [pipSupported, setPipSupported] = useState(false);
   const [fullscreenChatEnabled, setFullscreenChatEnabled] = useState(true);
   const [fsControlsVisible, setFsControlsVisible] = useState(true);
+  // True when a programmatic video.play() (triggered by a sync event, not a
+  // click) got rejected by the browser's autoplay policy. This happens to
+  // followers fairly often — the host's Play click is a real user gesture,
+  // but the follower's play() call is fired from a realtime event, which
+  // most browsers refuse to autoplay with sound. When this is true we show
+  // the play/pause button as tappable so the follower can supply the
+  // missing gesture themselves, without granting them real host controls.
+  const [needsPlayGesture, setNeedsPlayGesture] = useState(false);
   const wasBothConnectedRef = useRef(false);
   const initializedRef = useRef(false);
   const noteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -162,8 +170,13 @@ useEffect(() => {
         if (isController) return; // controller is ground truth, ignore stray echoes
         const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, lastEvent.isPlaying);
         const gap = Math.abs(video.currentTime - target);
-        if (lastEvent.isPlaying && video.paused) video.play().catch(() => {});
-        if (!lastEvent.isPlaying && !video.paused) video.pause();
+        if (lastEvent.isPlaying && video.paused) {
+          video.play().catch(() => setNeedsPlayGesture(true));
+        }
+        if (!lastEvent.isPlaying && !video.paused) {
+          video.pause();
+          setNeedsPlayGesture(false);
+        }
 
         if (gap >= LARGE_DRIFT_THRESHOLD) {
           video.playbackRate = 1;
@@ -187,13 +200,14 @@ useEffect(() => {
         const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, true);
         video.playbackRate = 1;
         video.currentTime = target;
-        video.play().catch(() => {});
+        video.play().catch(() => setNeedsPlayGesture(true));
         break;
       }
       case "pause": {
         video.playbackRate = 1;
         video.pause();
         video.currentTime = lastEvent.currentTime;
+        setNeedsPlayGesture(false);
         if (lastEvent.by !== myName) showNote(`${lastEvent.by} paused`);
         break;
       }
@@ -272,7 +286,10 @@ useEffect(() => {
   }, [isFullscreen, wakeFsControls]);
 
   // ── Local element event handlers ──
-  const onVideoPlay = () => setIsPlaying(true);
+  const onVideoPlay = () => {
+    setIsPlaying(true);
+    setNeedsPlayGesture(false);
+  };
   const onVideoPause = () => setIsPlaying(false);
   const onTimeUpdate = () => {
     if (videoRef.current) setCurrent(videoRef.current.currentTime);
@@ -303,14 +320,25 @@ useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
-      if (!isController) return; // only the host can start playback
-      video.play().catch(() => {});
-      broadcastPlay(video.currentTime);
-    } else {
-      // Universal pause — anyone can pause instantly, no permission needed.
-      video.pause();
-      broadcastPause(video.currentTime);
+      if (isController) {
+        video.play().catch(() => {});
+        broadcastPlay(video.currentTime);
+        return;
+      }
+      if (needsPlayGesture) {
+        // The browser blocked our earlier programmatic play() because it
+        // wasn't tied to a real click. This tap IS a real click, so it
+        // satisfies the browser — resume locally only. We're not taking
+        // control, just supplying the gesture the host's playback state
+        // already called for.
+        video.play().then(() => setNeedsPlayGesture(false)).catch(() => {});
+        return;
+      }
+      return; // only the host can start playback from a paused state
     }
+    // Universal pause — anyone can pause instantly, no permission needed.
+    video.pause();
+    broadcastPause(video.currentTime);
   };
 
   const handleSeekCommit = (value: number) => {
@@ -399,7 +427,10 @@ useEffect(() => {
 
     // Anyone can pause from the lock screen (universal pause). Resuming,
     // seeking, and skipping are host-only, same as the on-screen controls.
-    ms.setActionHandler("play", isController ? () => handlePlayPauseClick() : null);
+    ms.setActionHandler(
+      "play",
+      isController || needsPlayGesture ? () => handlePlayPauseClick() : null
+    );
     ms.setActionHandler("pause", () => handlePlayPauseClick());
     ms.setActionHandler("seekbackward", isController ? () => handleSkip(-10) : null);
     ms.setActionHandler("seekforward", isController ? () => handleSkip(10) : null);
@@ -420,7 +451,7 @@ useEffect(() => {
       ms.setActionHandler("seekto", null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isController, duration]);
+  }, [isController, duration, needsPlayGesture]);
 
   useEffect(() => {
     if (typeof navigator === "undefined" || !("mediaSession" in navigator) || !duration) return;
@@ -448,12 +479,14 @@ useEffect(() => {
       <div className="flex shrink-0 items-center gap-2">
         <button
           onClick={handlePlayPauseClick}
-          disabled={!isPlaying && !isController}
-          aria-label={isPlaying ? "Pause" : "Play"}
+          disabled={!isPlaying && !isController && !needsPlayGesture}
+          aria-label={isPlaying ? "Pause" : needsPlayGesture ? "Tap to resume" : "Play"}
           title={
             !isController
               ? isPlaying
                 ? "Pause (anyone can pause)"
+                : needsPlayGesture
+                ? "Your browser paused this — tap to resume"
                 : `Only ${room.host_name ?? "the host"} can start playback`
               : undefined
           }
