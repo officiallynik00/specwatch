@@ -19,7 +19,7 @@ export interface Room {
 // currently loaded into the shared player.
 export interface Movie {
   id: string;
-  room_id: string;
+  room_id: string | null;
   storage_path: string;
   title: string;
   file_size_bytes: number | null;
