@@ -9,11 +9,13 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4",
-    "next": "14.2.35",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
+  "@aws-sdk/client-s3": "^3.750.0",
+  "@aws-sdk/s3-request-presigner": "^3.750.0",
+  "@supabase/supabase-js": "^2.45.4",
+  "next": "14.2.35",
+  "react": "^18.3.1",
+  "react-dom": "^18.3.1"
+},
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
