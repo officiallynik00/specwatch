@@ -14,13 +14,15 @@ export default function RoomLobbyScreen() {
   const code = decodeURIComponent(params.code).toUpperCase();
   const router = useRouter();
 
-  const [name, setName] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [nameChecked, setNameChecked] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [copied, setCopied] = useState(false);
   const [entering, setEntering] = useState(false);
 
   useEffect(() => {
-    setName(sessionStorage.getItem("watchparty:name"));
+    setName(sessionStorage.getItem("watchparty:name") ?? "");
+    setNameChecked(true);
   }, []);
 
   // claimHostIfUnset: true — this is the lobby, so if we somehow land
