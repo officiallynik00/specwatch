@@ -176,6 +176,7 @@ export default function PlayerScreen() {
           partnerName={sync.partnerName}
           lastEvent={sync.lastEvent}
           heartbeatIntervalMs={sync.heartbeatIntervalMs}
+          clockOffsetMs={sync.clockOffsetMs}
           broadcastPlay={sync.broadcastPlay}
           broadcastPause={sync.broadcastPause}
           broadcastSeek={sync.broadcastSeek}
