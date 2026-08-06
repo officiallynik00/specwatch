@@ -88,6 +88,14 @@ export default function VideoPlayer({
   const noteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bufferAutoPausedRef = useRef(false);
   const fsControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True while the host has their finger/mouse down on the seek bar. The
+  // video keeps firing onTimeUpdate in the background during this whole
+  // time, and without this flag that kept snapping the slider's `current`
+  // value back to the live playback position — fighting the drag and
+  // making the handle jitter or spring back instead of following the
+  // pointer to wherever the host is dragging it.
+  const isSeekDraggingRef = useRef(false);
+  const seekDragValueRef = useRef(0);
   // serverSentAt (host's Date.now()) of the last play/seek/pause we've
   // actually applied. A heartbeat — or any event — sent BEFORE this was
   // already in flight when a newer action happened and lost the race, so
@@ -319,6 +327,11 @@ useEffect(() => {
   };
   const onVideoPause = () => setIsPlaying(false);
   const onTimeUpdate = () => {
+    // Ignore the video's own playback-position updates while the host is
+    // actively dragging the seek bar — otherwise this fires ~4x/sec and
+    // keeps overwriting `current` with the live position, fighting the
+    // drag in real time.
+    if (isSeekDraggingRef.current) return;
     if (videoRef.current) setCurrent(videoRef.current.currentTime);
   };
 
@@ -374,6 +387,38 @@ useEffect(() => {
     video.currentTime = value;
     broadcastSeek(value, !video.paused);
   };
+
+  const handleSeekDragStart = () => {
+    isSeekDraggingRef.current = true;
+  };
+
+  const handleSeekDragChange = (value: number) => {
+    seekDragValueRef.current = value;
+    setCurrent(value);
+  };
+
+  const handleSeekDragEnd = () => {
+    if (!isSeekDraggingRef.current) return;
+    isSeekDraggingRef.current = false;
+    handleSeekCommit(seekDragValueRef.current);
+  };
+
+  // Fallback for a drag that ends outside the slider itself (pointer
+  // dragged off the element before release) — the input's own onMouseUp/
+  // onTouchEnd won't fire in that case, so this catches it at the window
+  // level while a drag is in progress.
+  useEffect(() => {
+    const onWindowRelease = () => {
+      if (isSeekDraggingRef.current) handleSeekDragEnd();
+    };
+    window.addEventListener("mouseup", onWindowRelease);
+    window.addEventListener("touchend", onWindowRelease);
+    return () => {
+      window.removeEventListener("mouseup", onWindowRelease);
+      window.removeEventListener("touchend", onWindowRelease);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isController]);
 
   const handleSkip = (delta: number) => {
     const video = videoRef.current;
@@ -554,13 +599,11 @@ useEffect(() => {
           step={0.5}
           value={current}
           disabled={!isController}
-          onChange={(e) => setCurrent(Number(e.target.value))}
-          onMouseUp={(e) =>
-            handleSeekCommit(Number((e.target as HTMLInputElement).value))
-          }
-          onTouchEnd={(e) =>
-            handleSeekCommit(Number((e.target as HTMLInputElement).value))
-          }
+          onChange={(e) => handleSeekDragChange(Number(e.target.value))}
+          onMouseDown={handleSeekDragStart}
+          onTouchStart={handleSeekDragStart}
+          onMouseUp={handleSeekDragEnd}
+          onTouchEnd={handleSeekDragEnd}
           aria-label="Seek"
         />
         <span className="font-mono text-[10px] text-reel-muted sm:text-xs">
