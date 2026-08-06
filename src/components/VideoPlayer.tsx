@@ -22,9 +22,13 @@ interface VideoPlayerProps {
   partnerName: string | null;
   lastEvent: SyncEvent | null;
   heartbeatIntervalMs: number;
+  // Estimated (host's clock - my clock) in ms, from useRoomSync's
+  // ping/pong. Folded into compensate() so ordinary clock disagreement
+  // between two devices isn't mistaken for playback drift.
+  clockOffsetMs: number;
   broadcastPlay: (t: number) => void;
   broadcastPause: (t: number) => void;
-  broadcastSeek: (t: number) => void;
+  broadcastSeek: (t: number, isPlaying: boolean) => void;
   broadcastHeartbeat: (t: number, playing: boolean) => void;
   onEmoji: (emoji: string, by: string) => void;
   chatMessages: ChatMessage[];
@@ -49,6 +53,7 @@ export default function VideoPlayer({
   partnerName,
   lastEvent,
   heartbeatIntervalMs,
+  clockOffsetMs,
   broadcastPlay,
   broadcastPause,
   broadcastSeek,
@@ -83,6 +88,12 @@ export default function VideoPlayer({
   const noteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bufferAutoPausedRef = useRef(false);
   const fsControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // serverSentAt (host's Date.now()) of the last play/seek/pause we've
+  // actually applied. A heartbeat — or any event — sent BEFORE this was
+  // already in flight when a newer action happened and lost the race, so
+  // it must not be allowed to override what we already applied (e.g. a
+  // stale "I was at 0:40" heartbeat arriving just after a restart to 0:00).
+  const lastAuthoritativeSentAtRef = useRef(0);
 
   const [movieUrl, setMovieUrl] = useState<string | null>(null);
   
@@ -162,12 +173,22 @@ useEffect(() => {
     if (!lastEvent || !videoRef.current) return;
     const video = videoRef.current;
 
+    // Corrects for both network latency AND ordinary clock disagreement
+    // between the two devices (clockOffsetMs, measured via ping/pong in
+    // useRoomSync). Without the offset term, two devices whose clocks
+    // simply don't agree would read as permanent playback drift.
     const compensate = (t: number, sentAt: number, assumePlaying: boolean) =>
-      assumePlaying ? t + (Date.now() - sentAt) / 1000 : t;
+      assumePlaying ? t + (Date.now() - sentAt + clockOffsetMs) / 1000 : t;
 
     switch (lastEvent.type) {
       case "heartbeat": {
         if (isController) return; // controller is ground truth, ignore stray echoes
+        // Reject a heartbeat that predates the newest play/seek/pause we've
+        // already applied — it was already in flight when that newer,
+        // more authoritative action happened and lost the race. Without
+        // this check a stale "I was at 0:40" heartbeat can arrive right
+        // after a restart-to-0:00 and yank the follower back.
+        if (lastEvent.serverSentAt < lastAuthoritativeSentAtRef.current) return;
         const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, lastEvent.isPlaying);
         const gap = Math.abs(video.currentTime - target);
         if (lastEvent.isPlaying && video.paused) {
@@ -197,6 +218,7 @@ useEffect(() => {
       }
       case "play": {
         if (isController) break;
+        lastAuthoritativeSentAtRef.current = lastEvent.serverSentAt;
         const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, true);
         video.playbackRate = 1;
         video.currentTime = target;
@@ -204,6 +226,7 @@ useEffect(() => {
         break;
       }
       case "pause": {
+        lastAuthoritativeSentAtRef.current = lastEvent.serverSentAt;
         video.playbackRate = 1;
         video.pause();
         video.currentTime = lastEvent.currentTime;
@@ -213,7 +236,10 @@ useEffect(() => {
       }
       case "seek": {
         if (isController) break;
-        const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, !video.paused);
+        lastAuthoritativeSentAtRef.current = lastEvent.serverSentAt;
+        // Use the host's REAL play state at the moment of the seek,
+        // instead of guessing from our own (possibly stale) local state.
+        const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, lastEvent.isPlaying);
         video.playbackRate = 1;
         video.currentTime = target;
         break;
@@ -259,6 +285,7 @@ useEffect(() => {
             .eq("id", room.id)
             .maybeSingle();
           if (!data || !videoRef.current) return;
+          lastAuthoritativeSentAtRef.current = Date.now();
           videoRef.current.currentTime = data.last_position_seconds;
           if (data.is_playing) videoRef.current.play().catch(() => {});
           showNote("Back in sync", 1800);
@@ -345,7 +372,7 @@ useEffect(() => {
     const video = videoRef.current;
     if (!video || !isController) return;
     video.currentTime = value;
-    broadcastSeek(value);
+    broadcastSeek(value, !video.paused);
   };
 
   const handleSkip = (delta: number) => {
@@ -353,7 +380,7 @@ useEffect(() => {
     if (!video || !isController) return;
     const target = Math.max(0, Math.min(duration || Infinity, video.currentTime + delta));
     video.currentTime = target;
-    broadcastSeek(target);
+    broadcastSeek(target, !video.paused);
   };
 
   // ── Fullscreen ──
