@@ -67,6 +67,10 @@ export type SyncEvent =
       currentTime: number;
       controllerName: string;
       serverSentAt: number;
+      // Whether the host was actually playing at the moment of the seek.
+      // Without this the follower has to guess play/pause state from its
+      // own (possibly stale) local state instead of the host's real one.
+      isPlaying: boolean;
     }
   | {
       type: "emoji";
