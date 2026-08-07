@@ -4,11 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useRoomSync } from "@/hooks/useRoomSync";
 import { useChat } from "@/hooks/useChat";
+import { usePushToTalk } from "@/hooks/usePushToTalk";
 import VideoPlayer from "@/components/VideoPlayer";
 import YouTubePlayer from "@/components/YouTubePlayer";
 import EmojiOverlay, { type FloatingBubble } from "@/components/EmojiOverlay";
 import ChatDrawer from "@/components/ChatDrawer";
 import ConnectionStatus from "@/components/ConnectionStatus";
+import PushToTalkButton from "@/components/PushToTalkButton";
 
 export default function PlayerScreen() {
   const params = useParams<{ code: string }>();
@@ -31,6 +33,12 @@ export default function PlayerScreen() {
 
   const sync = useRoomSync({ roomCode: code, myName: name ?? "" });
   const { messages, sendMessage } = useChat(sync.room?.id ?? null);
+  const ptt = usePushToTalk({
+    roomCode: code,
+    myName: name ?? "",
+    partnerName: sync.partnerName,
+    isHost: sync.isHost,
+  });
 
   // Fires the "movie's ready" notice the moment the room transitions
   // from no-movie to a movie being loaded — mainly for the visitor, who
@@ -217,6 +225,16 @@ export default function PlayerScreen() {
         messages={messages}
         myName={name}
         onSend={handleSendChat}
+      />
+
+      <PushToTalkButton
+        status={ptt.status}
+        isTalking={ptt.isTalking}
+        partnerTalking={ptt.partnerTalking}
+        error={ptt.error}
+        partnerName={sync.partnerName}
+        onStart={ptt.startTalking}
+        onStop={ptt.stopTalking}
       />
     </main>
   );
