@@ -3,13 +3,43 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase/client";
 import type { ConnectionStatus } from "@/hooks/useRoomSync";
-import type { ChatMessage, Room, SyncEvent } from "@/lib/types";
+import type { ChatMessage, Room, SyncEvent, Subtitle } from "@/lib/types";
 import FullscreenChatOverlay from "@/components/FullscreenChatOverlay";
 
 const SMALL_DRIFT_THRESHOLD = 0.5; // seconds — corrected via a gentle playbackRate nudge
 const LARGE_DRIFT_THRESHOLD = 1.5; // seconds — hard resync + visible status
 const NUDGE_RATE_FAST = 1.06; // used when we're behind the controller
 const NUDGE_RATE_SLOW = 0.94; // used when we're ahead of the controller
+
+// audioTracks isn't in TS's lib.dom.d.ts (it's Chrome/Edge/Safari-only,
+// not standardized) — this is the minimal shape we actually use.
+interface AudioTrackLike {
+  id: string;
+  label: string;
+  language: string;
+  enabled: boolean;
+}
+interface AudioTrackListLike extends EventTarget {
+  readonly length: number;
+  [index: number]: AudioTrackLike;
+}
+interface MediaElementWithAudioTracks extends HTMLVideoElement {
+  audioTracks?: AudioTrackListLike;
+}
+
+/** Selected subtitle: "off", `own:<subtitleId>` (an uploaded file), or
+ *  `embedded:<index>` (an in-band track already in the source file). */
+type SubtitleSelection = "off" | `own:${string}` | `embedded:${number}`;
+
+// <track> only accepts WebVTT. SRT differs just enough (comma instead of
+// a dot in timestamps, no "WEBVTT" header) that a straight cue-timing
+// regex swap is enough — no real parsing needed.
+function srtToVtt(srt: string): string {
+  const body = srt
+    .replace(/\r+/g, "")
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
+  return `WEBVTT\n\n${body}`;
+}
 
 
 interface VideoPlayerProps {
@@ -104,7 +134,27 @@ export default function VideoPlayer({
   const lastAuthoritativeSentAtRef = useRef(0);
 
   const [movieUrl, setMovieUrl] = useState<string | null>(null);
-  
+
+  // ── Subtitles ──
+  // Metadata for the current movie's uploaded subtitle files (from the
+  // `movies` table), keyed to blob URLs holding VTT-converted text once
+  // each one has been fetched. `own:<track>` elements ref map lets us
+  // tell our own <track>s apart from any in-band tracks already baked
+  // into the source file (embedded tracks show up in video.textTracks
+  // automatically, with no <track> element of ours involved).
+  const [subtitleMeta, setSubtitleMeta] = useState<Subtitle[]>([]);
+  const [subtitleUrls, setSubtitleUrls] = useState<Record<string, string>>({});
+  const [embeddedTracks, setEmbeddedTracks] = useState<TextTrack[]>([]);
+  const [subtitleSelection, setSubtitleSelection] = useState<SubtitleSelection>("off");
+  const [subsMenuOpen, setSubsMenuOpen] = useState(false);
+  const ownTrackElsRef = useRef<Map<string, HTMLTrackElement>>(new Map());
+
+  // ── Audio tracks (in-band, e.g. a dual-language MP4/MKV) ──
+  const [audioTracks, setAudioTracks] = useState<AudioTrackLike[]>([]);
+  const [selectedAudioId, setSelectedAudioId] = useState<string | null>(null);
+  const [audioMenuOpen, setAudioMenuOpen] = useState(false);
+  const avMenuWrapRef = useRef<HTMLDivElement>(null);
+
   const showNote = useCallback((text: string, ms = 2500) => {
     setStatusNote(text);
     if (noteTimeoutRef.current) clearTimeout(noteTimeoutRef.current);
@@ -140,6 +190,171 @@ useEffect(() => {
     cancelled = true;
   };
 }, [room.movie_path, showNote]);
+
+  // Look up the subtitles attached to whichever library movie is loaded.
+  // room.movie_path is just a storage key, so we match it back to its
+  // `movies` row here rather than threading the whole Movie object
+  // through every screen between the lobby and the player.
+  useEffect(() => {
+    setSubtitleSelection("off");
+    if (!room.movie_path) {
+      setSubtitleMeta([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase
+        .from("movies")
+        .select("subtitles")
+        .eq("storage_path", room.movie_path)
+        .maybeSingle();
+      if (!cancelled) setSubtitleMeta((data?.subtitles as Subtitle[] | undefined) ?? []);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [room.movie_path]);
+
+  // Resolve each subtitle to a playable VTT blob URL: sign a GET URL for
+  // the (private) storage object, fetch its text, convert SRT -> VTT if
+  // needed, and wrap it in a blob URL <track src> can actually use.
+  useEffect(() => {
+    if (subtitleMeta.length === 0) {
+      setSubtitleUrls({});
+      return;
+    }
+    let cancelled = false;
+    const createdUrls: string[] = [];
+    (async () => {
+      const entries: [string, string][] = [];
+      for (const sub of subtitleMeta) {
+        try {
+          const res = await fetch("/api/r2-play-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: sub.storage_path }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.url) continue;
+          const text = await (await fetch(data.url)).text();
+          const isSrt = sub.storage_path.toLowerCase().endsWith(".srt");
+          const blobUrl = URL.createObjectURL(
+            new Blob([isSrt ? srtToVtt(text) : text], { type: "text/vtt" })
+          );
+          createdUrls.push(blobUrl);
+          entries.push([sub.id, blobUrl]);
+        } catch {
+          // Skip this one subtitle rather than failing the whole list.
+        }
+      }
+      if (!cancelled) setSubtitleUrls(Object.fromEntries(entries));
+    })();
+    return () => {
+      cancelled = true;
+      createdUrls.forEach((u) => URL.revokeObjectURL(u));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subtitleMeta]);
+
+  // Track in-band ("embedded") subtitle/caption tracks that came baked
+  // into the source file itself — anything in video.textTracks that
+  // isn't one of the <track> elements we rendered ourselves.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const updateEmbedded = () => {
+      const ownTracks = new Set(
+        Array.from(ownTrackElsRef.current.values())
+          .map((el) => el.track)
+          .filter(Boolean)
+      );
+      const found: TextTrack[] = [];
+      for (let i = 0; i < video.textTracks.length; i++) {
+        const t = video.textTracks[i];
+        if ((t.kind === "subtitles" || t.kind === "captions") && !ownTracks.has(t)) {
+          found.push(t);
+        }
+      }
+      setEmbeddedTracks(found);
+    };
+    updateEmbedded();
+    video.textTracks.addEventListener("addtrack", updateEmbedded);
+    video.textTracks.addEventListener("removetrack", updateEmbedded);
+    return () => {
+      video.textTracks.removeEventListener("addtrack", updateEmbedded);
+      video.textTracks.removeEventListener("removetrack", updateEmbedded);
+    };
+  }, [movieUrl, subtitleUrls]);
+
+  // Apply whichever subtitle the viewer picked. Purely local — everyone
+  // in the room can pick a different subtitle (or audio track) for
+  // themselves without affecting playback sync for the other person.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    for (let i = 0; i < video.textTracks.length; i++) video.textTracks[i].mode = "disabled";
+    if (subtitleSelection.startsWith("own:")) {
+      const track = ownTrackElsRef.current.get(subtitleSelection.slice(4))?.track;
+      if (track) track.mode = "showing";
+    } else if (subtitleSelection.startsWith("embedded:")) {
+      const track = embeddedTracks[Number(subtitleSelection.slice(9))];
+      if (track) track.mode = "showing";
+    }
+  }, [subtitleSelection, embeddedTracks]);
+
+  // Discover and manage in-band audio tracks (e.g. a dual-language file).
+  // Only Chromium/Safari expose HTMLMediaElement.audioTracks — Firefox
+  // doesn't, so the control simply won't appear there.
+  useEffect(() => {
+    const video = videoRef.current as MediaElementWithAudioTracks | null;
+    const list = video?.audioTracks;
+    if (!video || !list) {
+      setAudioTracks([]);
+      return;
+    }
+    const update = () => {
+      const tracks: AudioTrackLike[] = [];
+      let enabledId: string | null = null;
+      for (let i = 0; i < list.length; i++) {
+        const t = list[i];
+        tracks.push(t);
+        if (t.enabled) enabledId = t.id;
+      }
+      setAudioTracks(tracks);
+      setSelectedAudioId(enabledId);
+    };
+    update();
+    list.addEventListener("addtrack", update);
+    list.addEventListener("removetrack", update);
+    list.addEventListener("change", update);
+    return () => {
+      list.removeEventListener("addtrack", update);
+      list.removeEventListener("removetrack", update);
+      list.removeEventListener("change", update);
+    };
+  }, [movieUrl]);
+
+  // Close the audio/subtitle dropdowns on any click outside them.
+  useEffect(() => {
+    if (!audioMenuOpen && !subsMenuOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (avMenuWrapRef.current && !avMenuWrapRef.current.contains(e.target as Node)) {
+        setAudioMenuOpen(false);
+        setSubsMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [audioMenuOpen, subsMenuOpen]);
+
+  const handleSelectAudioTrack = useCallback((id: string) => {
+    const video = videoRef.current as MediaElementWithAudioTracks | null;
+    const list = video?.audioTracks;
+    if (!list) return;
+    for (let i = 0; i < list.length; i++) list[i].enabled = list[i].id === id;
+    setSelectedAudioId(id);
+    setAudioMenuOpen(false);
+  }, []);
 
   
 
@@ -611,6 +826,120 @@ useEffect(() => {
         </span>
       </div>
 
+      {/* Audio track / subtitle pickers — purely local to each viewer,
+          so these are available regardless of who's controlling playback. */}
+      {(audioTracks.length > 1 || subtitleMeta.length > 0 || embeddedTracks.length > 0) && (
+        <div ref={avMenuWrapRef} className="flex shrink-0 items-center gap-1.5">
+          {audioTracks.length > 1 && (
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setAudioMenuOpen((v) => !v);
+                  setSubsMenuOpen(false);
+                }}
+                aria-label="Audio track"
+                aria-expanded={audioMenuOpen}
+                title="Audio track"
+                className={`flex h-7 items-center justify-center rounded-full border px-2.5 text-[11px] transition sm:text-xs ${
+                  audioMenuOpen
+                    ? "border-reel-amber text-reel-amber"
+                    : "border-reel-border text-reel-muted hover:border-reel-amber hover:text-reel-amber"
+                }`}
+              >
+                🔊
+              </button>
+              {audioMenuOpen && (
+                <div className="absolute bottom-full right-0 z-20 mb-2 w-44 overflow-hidden rounded-lg border border-reel-border bg-reel-surface shadow-xl">
+                  <p className="border-b border-reel-border px-3 py-1.5 text-[10px] uppercase tracking-wide text-reel-muted">
+                    Audio
+                  </p>
+                  {audioTracks.map((t, i) => (
+                    <button
+                      key={t.id || i}
+                      onClick={() => handleSelectAudioTrack(t.id)}
+                      className={`block w-full px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
+                        selectedAudioId === t.id ? "text-reel-amber" : "text-reel-text"
+                      }`}
+                    >
+                      {t.label || t.language || `Track ${i + 1}`}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {(subtitleMeta.length > 0 || embeddedTracks.length > 0) && (
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setSubsMenuOpen((v) => !v);
+                  setAudioMenuOpen(false);
+                }}
+                aria-label="Subtitles"
+                aria-expanded={subsMenuOpen}
+                title="Subtitles"
+                className={`flex h-7 items-center justify-center rounded-full border px-2.5 text-[11px] font-medium transition sm:text-xs ${
+                  subsMenuOpen || subtitleSelection !== "off"
+                    ? "border-reel-amber text-reel-amber"
+                    : "border-reel-border text-reel-muted hover:border-reel-amber hover:text-reel-amber"
+                }`}
+              >
+                CC
+              </button>
+              {subsMenuOpen && (
+                <div className="absolute bottom-full right-0 z-20 mb-2 w-48 overflow-hidden rounded-lg border border-reel-border bg-reel-surface shadow-xl">
+                  <p className="border-b border-reel-border px-3 py-1.5 text-[10px] uppercase tracking-wide text-reel-muted">
+                    Subtitles
+                  </p>
+                  <button
+                    onClick={() => {
+                      setSubtitleSelection("off");
+                      setSubsMenuOpen(false);
+                    }}
+                    className={`block w-full px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
+                      subtitleSelection === "off" ? "text-reel-amber" : "text-reel-text"
+                    }`}
+                  >
+                    Off
+                  </button>
+                  {subtitleMeta.map((sub) => (
+                    <button
+                      key={sub.id}
+                      onClick={() => {
+                        setSubtitleSelection(`own:${sub.id}`);
+                        setSubsMenuOpen(false);
+                      }}
+                      disabled={!subtitleUrls[sub.id]}
+                      className={`block w-full px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 disabled:cursor-wait disabled:opacity-40 ${
+                        subtitleSelection === `own:${sub.id}` ? "text-reel-amber" : "text-reel-text"
+                      }`}
+                    >
+                      {sub.label}
+                      {!subtitleUrls[sub.id] ? " (loading…)" : ""}
+                    </button>
+                  ))}
+                  {embeddedTracks.map((t, i) => (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        setSubtitleSelection(`embedded:${i}`);
+                        setSubsMenuOpen(false);
+                      }}
+                      className={`block w-full px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
+                        subtitleSelection === `embedded:${i}` ? "text-reel-amber" : "text-reel-text"
+                      }`}
+                    >
+                      {t.label || t.language || `Track ${i + 1}`}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {!isController && (
         <span className="shrink-0 rounded-full border border-reel-border bg-black/30 px-2.5 py-1 text-[10px] text-reel-muted backdrop-blur-sm sm:px-3 sm:py-1.5 sm:text-xs">
           {room.host_name ?? "Host"} controls playback
@@ -654,7 +983,24 @@ useEffect(() => {
           onWaiting={onVideoWaiting}
           onPlaying={onVideoPlaying}
           playsInline
-        />
+        >
+          {subtitleMeta.map(
+            (sub) =>
+              subtitleUrls[sub.id] && (
+                <track
+                  key={sub.id}
+                  ref={(el) => {
+                    if (el) ownTrackElsRef.current.set(sub.id, el);
+                    else ownTrackElsRef.current.delete(sub.id);
+                  }}
+                  kind="subtitles"
+                  src={subtitleUrls[sub.id]}
+                  label={sub.label}
+                  srcLang={sub.lang || "en"}
+                />
+              )
+          )}
+        </video>
 
         {statusNote && (
           <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-black/70 px-4 py-1.5 text-sm text-reel-text backdrop-blur">
