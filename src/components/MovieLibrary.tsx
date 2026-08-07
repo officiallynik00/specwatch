@@ -13,6 +13,8 @@ interface MovieLibraryProps {
   onAdd: (file: File) => void;
   onRemove: (movie: Movie) => void;
   onPlay: (movie: Movie) => void;
+  onAddSubtitle: (movie: Movie, file: File) => void;
+  onRemoveSubtitle: (movie: Movie, subtitleId: string) => void;
 }
 
 function formatBytes(bytes: number | null): string {
@@ -36,10 +38,14 @@ export default function MovieLibrary({
   onAdd,
   onRemove,
   onPlay,
+  onAddSubtitle,
+  onRemoveSubtitle,
 }: MovieLibraryProps) {
   // Two-tap remove ("Remove" -> "Confirm?") instead of a browser confirm()
   // dialog, so it stays consistent with the app's own visual language.
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  // Which movie's subtitle list is expanded (only one at a time).
+  const [expandedSubsId, setExpandedSubsId] = useState<string | null>(null);
 
   function handleRemoveClick(movie: Movie) {
     if (confirmingId === movie.id) {
@@ -95,41 +101,95 @@ export default function MovieLibrary({
           {movies.map((movie) => {
             const isCurrent = movie.storage_path === currentMoviePath;
             const confirming = confirmingId === movie.id;
+            const subsOpen = expandedSubsId === movie.id;
+            const subtitleCount = movie.subtitles?.length ?? 0;
             return (
               <li
                 key={movie.id}
-                className={`flex items-center gap-3 rounded-xl border px-4 py-3 transition ${
+                className={`rounded-xl border px-4 py-3 transition ${
                   isCurrent ? "border-reel-amber bg-reel-surface2" : "border-reel-border bg-reel-surface"
                 }`}
               >
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-reel-bg text-lg">
-                  🎬
+                <div className="flex items-center gap-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-reel-bg text-lg">
+                    🎬
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-display text-sm italic text-reel-text">{movie.title}</p>
+                    <p className="truncate text-[11px] text-reel-muted">
+                      {formatDate(movie.uploaded_at)}
+                      {movie.file_size_bytes ? ` · ${formatBytes(movie.file_size_bytes)}` : ""}
+                      {isCurrent ? " · Now loaded" : ""}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setExpandedSubsId(subsOpen ? null : movie.id)}
+                    aria-expanded={subsOpen}
+                    title="Subtitles"
+                    className={`shrink-0 rounded-full border px-2.5 py-1.5 text-[11px] font-medium transition ${
+                      subsOpen || subtitleCount > 0
+                        ? "border-reel-amber text-reel-amber"
+                        : "border-reel-border text-reel-muted hover:border-reel-amber hover:text-reel-amber"
+                    }`}
+                  >
+                    CC{subtitleCount > 0 ? ` ${subtitleCount}` : ""}
+                  </button>
+                  <button
+                    onClick={() => onPlay(movie)}
+                    className="shrink-0 rounded-full bg-reel-amber px-4 py-1.5 text-xs font-medium text-reel-bg transition hover:bg-reel-amberDim"
+                  >
+                    Play
+                  </button>
+                  <button
+                    onClick={() => handleRemoveClick(movie)}
+                    onBlur={() => setConfirmingId(null)}
+                    className={`shrink-0 rounded-full border px-3 py-1.5 text-xs transition ${
+                      confirming
+                        ? "border-reel-rose text-reel-rose"
+                        : "border-reel-border text-reel-muted hover:border-reel-rose hover:text-reel-rose"
+                    }`}
+                  >
+                    {confirming ? "Confirm?" : "Remove"}
+                  </button>
                 </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate font-display text-sm italic text-reel-text">{movie.title}</p>
-                  <p className="truncate text-[11px] text-reel-muted">
-                    {formatDate(movie.uploaded_at)}
-                    {movie.file_size_bytes ? ` · ${formatBytes(movie.file_size_bytes)}` : ""}
-                    {isCurrent ? " · Now loaded" : ""}
-                  </p>
-                </div>
-                <button
-                  onClick={() => onPlay(movie)}
-                  className="shrink-0 rounded-full bg-reel-amber px-4 py-1.5 text-xs font-medium text-reel-bg transition hover:bg-reel-amberDim"
-                >
-                  Play
-                </button>
-                <button
-                  onClick={() => handleRemoveClick(movie)}
-                  onBlur={() => setConfirmingId(null)}
-                  className={`shrink-0 rounded-full border px-3 py-1.5 text-xs transition ${
-                    confirming
-                      ? "border-reel-rose text-reel-rose"
-                      : "border-reel-border text-reel-muted hover:border-reel-rose hover:text-reel-rose"
-                  }`}
-                >
-                  {confirming ? "Confirm?" : "Remove"}
-                </button>
+
+                {subsOpen && (
+                  <div className="mt-3 border-t border-reel-border pt-3">
+                    {subtitleCount === 0 ? (
+                      <p className="mb-2 text-[11px] text-reel-muted">No subtitle files added yet.</p>
+                    ) : (
+                      <ul className="mb-2 space-y-1.5">
+                        {movie.subtitles.map((sub) => (
+                          <li
+                            key={sub.id}
+                            className="flex items-center justify-between gap-2 rounded-lg bg-reel-bg px-3 py-1.5"
+                          >
+                            <span className="truncate text-xs text-reel-text">{sub.label}</span>
+                            <button
+                              onClick={() => onRemoveSubtitle(movie, sub.id)}
+                              className="shrink-0 text-[11px] text-reel-muted hover:text-reel-rose"
+                            >
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <label className="inline-block cursor-pointer rounded-full border border-dashed border-reel-border px-3 py-1.5 text-[11px] text-reel-muted transition hover:border-reel-amber hover:text-reel-amber">
+                      + Add subtitle (.vtt / .srt)
+                      <input
+                        type="file"
+                        accept=".vtt,.srt,text/vtt"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) onAddSubtitle(movie, file);
+                          e.target.value = "";
+                        }}
+                      />
+                    </label>
+                  </div>
+                )}
               </li>
             );
           })}
