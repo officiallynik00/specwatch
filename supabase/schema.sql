@@ -156,3 +156,9 @@ alter table movies add constraint movies_room_id_fkey
 
 drop index if exists movies_room_id_idx;
 create index if not exists movies_uploaded_at_idx on movies (uploaded_at desc);
+
+-- ── subtitles ──
+-- Each entry: { id, storage_path, label, lang }. Uploaded via the same
+-- presigned-URL B2 routes as the movie file itself (see
+-- /api/r2-upload-url, /api/r2-play-url) — only the DB row is different.
+alter table movies add column if not exists subtitles jsonb not null default '[]'::jsonb;
