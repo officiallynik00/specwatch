@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useRoomSync } from "@/hooks/useRoomSync";
 import { useChat } from "@/hooks/useChat";
 import VideoPlayer from "@/components/VideoPlayer";
+import YouTubePlayer from "@/components/YouTubePlayer";
 import EmojiOverlay, { type FloatingBubble } from "@/components/EmojiOverlay";
 import ChatDrawer from "@/components/ChatDrawer";
 import ConnectionStatus from "@/components/ConnectionStatus";
@@ -36,14 +37,14 @@ export default function PlayerScreen() {
   // was sitting on the waiting screen below and just watched it turn
   // into a real player.
   useEffect(() => {
-    const hasMovie = !!sync.room?.movie_path;
+    const hasMovie = !!(sync.room?.movie_path || sync.room?.youtube_video_id);
     if (hasMovie && !hadMovieRef.current) {
       setJustLoadedNotice(true);
       if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
       noticeTimeoutRef.current = setTimeout(() => setJustLoadedNotice(false), 4000);
     }
     hadMovieRef.current = hasMovie;
-  }, [sync.room?.movie_path]);
+  }, [sync.room?.movie_path, sync.room?.youtube_video_id]);
 
   useEffect(() => {
     return () => {
@@ -117,7 +118,7 @@ export default function PlayerScreen() {
     );
   }
 
-  if (!sync.room.movie_path) {
+  if (!sync.room.movie_path && !sync.room.youtube_video_id) {
     if (sync.isHost) {
       // The host manages the library from the lobby, not here — send
       // them back to pick something.
@@ -168,23 +169,41 @@ export default function PlayerScreen() {
       )}
 
       <div className="relative">
-        <VideoPlayer
-          room={sync.room}
-          myName={name}
-          isController={sync.isController}
-          connectionStatus={sync.connectionStatus}
-          partnerName={sync.partnerName}
-          lastEvent={sync.lastEvent}
-          heartbeatIntervalMs={sync.heartbeatIntervalMs}
-          clockOffsetMs={sync.clockOffsetMs}
-          broadcastPlay={sync.broadcastPlay}
-          broadcastPause={sync.broadcastPause}
-          broadcastSeek={sync.broadcastSeek}
-          broadcastHeartbeat={sync.broadcastHeartbeat}
-          onEmoji={handleRemoteEmoji}
-          chatMessages={messages}
-          onSendChat={handleSendChat}
-        />
+        {sync.room.source_type === "youtube" ? (
+          <YouTubePlayer
+            room={sync.room}
+            myName={name}
+            isController={sync.isController}
+            connectionStatus={sync.connectionStatus}
+            partnerName={sync.partnerName}
+            lastEvent={sync.lastEvent}
+            heartbeatIntervalMs={sync.heartbeatIntervalMs}
+            clockOffsetMs={sync.clockOffsetMs}
+            broadcastPlay={sync.broadcastPlay}
+            broadcastPause={sync.broadcastPause}
+            broadcastSeek={sync.broadcastSeek}
+            broadcastHeartbeat={sync.broadcastHeartbeat}
+            onEmoji={handleRemoteEmoji}
+          />
+        ) : (
+          <VideoPlayer
+            room={sync.room}
+            myName={name}
+            isController={sync.isController}
+            connectionStatus={sync.connectionStatus}
+            partnerName={sync.partnerName}
+            lastEvent={sync.lastEvent}
+            heartbeatIntervalMs={sync.heartbeatIntervalMs}
+            clockOffsetMs={sync.clockOffsetMs}
+            broadcastPlay={sync.broadcastPlay}
+            broadcastPause={sync.broadcastPause}
+            broadcastSeek={sync.broadcastSeek}
+            broadcastHeartbeat={sync.broadcastHeartbeat}
+            onEmoji={handleRemoteEmoji}
+            chatMessages={messages}
+            onSendChat={handleSendChat}
+          />
+        )}
         <EmojiOverlay bubbles={bubbles} onRemove={removeBubble} onTap={handleTapEmoji} />
       </div>
 

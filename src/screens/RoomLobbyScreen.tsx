@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useRoomSync } from "@/hooks/useRoomSync";
 import { useMovieLibrary } from "@/hooks/useMovieLibrary";
 import MovieLibrary from "@/components/MovieLibrary";
+import YouTubeLinkInput from "@/components/YouTubeLinkInput";
 import ConnectionStatus from "@/components/ConnectionStatus";
 import { supabase } from "@/lib/supabase/client";
 import type { Movie } from "@/lib/types";
@@ -19,6 +20,7 @@ export default function RoomLobbyScreen() {
   const [nameInput, setNameInput] = useState("");
   const [copied, setCopied] = useState(false);
   const [entering, setEntering] = useState(false);
+  const [sourceTab, setSourceTab] = useState<"file" | "youtube">("file");
 
   useEffect(() => {
     setName(sessionStorage.getItem("watchparty:name") ?? "");
@@ -75,9 +77,32 @@ export default function RoomLobbyScreen() {
     const { error } = await supabase
       .from("rooms")
       .update({
+        source_type: "file",
         movie_path: movie.storage_path,
         movie_title: movie.title,
         movie_uploaded_at: movie.uploaded_at,
+        youtube_video_id: null,
+        last_position_seconds: 0,
+        is_playing: false,
+      })
+      .eq("id", room.id);
+    setEntering(false);
+    if (!error) router.push(`/room/${code}/player`);
+  }
+
+  // Same idea as playMovie, for the YouTube path: flips the room's shared
+  // playback pointer, which both VideoPlayer/YouTubePlayer instances key
+  // off of, then heads into the player.
+  async function playYouTube(preview: { videoId: string; title: string }) {
+    if (!room || entering) return;
+    setEntering(true);
+    const { error } = await supabase
+      .from("rooms")
+      .update({
+        source_type: "youtube",
+        youtube_video_id: preview.videoId,
+        movie_title: preview.title,
+        movie_path: null,
         last_position_seconds: 0,
         is_playing: false,
       })
@@ -173,7 +198,7 @@ export default function RoomLobbyScreen() {
 
         <div className="sprocket-rule mb-6" />
 
-        {room.movie_path && (
+        {(room.movie_path || room.youtube_video_id) && (
           <div className="mb-6 rounded-xl border border-reel-border bg-reel-surface p-6">
             <p className="mb-1 text-xs uppercase tracking-wide text-reel-muted">Now loaded</p>
             <p className="mb-5 font-display text-xl italic text-reel-text">{room.movie_title}</p>
@@ -188,19 +213,42 @@ export default function RoomLobbyScreen() {
       </div>
 
       <div className="w-full max-w-md text-left">
-        <MovieLibrary
-          movies={library.movies}
-          loading={library.loading}
-          uploading={library.uploading}
-          progress={library.progress}
-          error={library.error}
-          currentMoviePath={room.movie_path}
-          onAdd={library.addMovie}
-          onRemove={library.removeMovie}
-          onPlay={playMovie}
-          onAddSubtitle={library.addSubtitle}
-          onRemoveSubtitle={library.removeSubtitle}
-        />
+        <div className="mb-4 flex gap-1 rounded-full border border-reel-border bg-reel-surface p-1">
+          <button
+            onClick={() => setSourceTab("file")}
+            className={`flex-1 rounded-full py-2 text-xs font-medium transition ${
+              sourceTab === "file" ? "bg-reel-amber text-reel-bg" : "text-reel-muted hover:text-reel-text"
+            }`}
+          >
+            Upload a movie
+          </button>
+          <button
+            onClick={() => setSourceTab("youtube")}
+            className={`flex-1 rounded-full py-2 text-xs font-medium transition ${
+              sourceTab === "youtube" ? "bg-reel-amber text-reel-bg" : "text-reel-muted hover:text-reel-text"
+            }`}
+          >
+            YouTube link
+          </button>
+        </div>
+
+        {sourceTab === "file" ? (
+          <MovieLibrary
+            movies={library.movies}
+            loading={library.loading}
+            uploading={library.uploading}
+            progress={library.progress}
+            error={library.error}
+            currentMoviePath={room.movie_path}
+            onAdd={library.addMovie}
+            onRemove={library.removeMovie}
+            onPlay={playMovie}
+            onAddSubtitle={library.addSubtitle}
+            onRemoveSubtitle={library.removeSubtitle}
+          />
+        ) : (
+          <YouTubeLinkInput currentVideoId={room.youtube_video_id} onPlay={playYouTube} />
+        )}
       </div>
     </main>
   );
