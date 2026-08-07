@@ -198,6 +198,8 @@ export default function RoomLobbyScreen() {
           onAdd={library.addMovie}
           onRemove={library.removeMovie}
           onPlay={playMovie}
+          onAddSubtitle={library.addSubtitle}
+          onRemoveSubtitle={library.removeSubtitle}
         />
       </div>
     </main>
