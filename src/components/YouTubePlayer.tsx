@@ -142,6 +142,21 @@ export default function YouTubePlayer({
   const bufferAutoPausedRef = useRef(false);
   const noteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gestureCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const expectingBufferRef = useRef(false);
+  const expectingBufferTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Call right before any controller-initiated seekTo()/resume. The
+  // IFrame API almost always drops into BUFFERING right after a
+  // deliberate seek — this marks that upcoming buffer as "expected" so
+  // the stall-detector below doesn't mistake a normal skip/scrub/resume
+  // for a dropped connection and needlessly pause the follower.
+  const markExpectedBuffer = useCallback(() => {
+    expectingBufferRef.current = true;
+    if (expectingBufferTimeoutRef.current) clearTimeout(expectingBufferTimeoutRef.current);
+    expectingBufferTimeoutRef.current = setTimeout(() => {
+      expectingBufferRef.current = false;
+    }, 4000);
+  }, []);
 
   const showNote = useCallback((text: string, ms = 2500) => {
     setStatusNote(text);
@@ -174,15 +189,19 @@ export default function YouTubePlayer({
             setIsBuffering(buffering);
 
             // Mirror the file player's "controller stalls -> tell the
-            // follower to pause too" behavior.
+            // follower to pause too" behavior. Buffering triggered by our
+            // own deliberate seek/resume (markExpectedBuffer) is not a
+            // stall and must not trigger this — otherwise every skip,
+            // scrub, or resume spuriously pauses the follower.
             if (isController) {
-              if (buffering && !bufferAutoPausedRef.current) {
+              if (buffering && !bufferAutoPausedRef.current && !expectingBufferRef.current) {
                 bufferAutoPausedRef.current = true;
                 broadcastPause(playerRef.current?.getCurrentTime() ?? current);
               } else if (state === YT.PlayerState.PLAYING && bufferAutoPausedRef.current) {
                 bufferAutoPausedRef.current = false;
                 broadcastPlay(playerRef.current?.getCurrentTime() ?? current);
               }
+              if (state === YT.PlayerState.PLAYING) expectingBufferRef.current = false;
             }
             if (state === YT.PlayerState.PLAYING) setNeedsPlayGesture(false);
           },
@@ -230,7 +249,15 @@ export default function YouTubePlayer({
     player.playVideo();
     if (gestureCheckRef.current) clearTimeout(gestureCheckRef.current);
     gestureCheckRef.current = setTimeout(() => {
-      if (player.getPlayerState() !== window.YT?.PlayerState.PLAYING) {
+      const YT = window.YT;
+      if (!YT) return;
+      const state = player.getPlayerState();
+      // Still buffering (e.g. right after a resync/skip seekTo) is not a
+      // blocked autoplay — it's just loading, and will resolve on its
+      // own. Only surface the "Tap to play" overlay for a state that
+      // looks genuinely stuck (paused/cued/unstarted), not mid-buffer.
+      if (state === YT.PlayerState.BUFFERING) return;
+      if (state !== YT.PlayerState.PLAYING) {
         setNeedsPlayGesture(true);
       }
     }, PLAY_GESTURE_CHECK_MS);
@@ -249,6 +276,10 @@ export default function YouTubePlayer({
       case "heartbeat": {
         if (isController) return;
         if (lastEvent.serverSentAt < lastAuthoritativeSentAtRef.current) return;
+        // Already mid-buffer from a previous correction — stacking
+        // another seekTo() on top just extends the stall instead of
+        // resolving it. Let the in-flight one finish first.
+        if (player.getPlayerState() === YT.PlayerState.BUFFERING) return;
         const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, lastEvent.isPlaying);
         const gap = Math.abs(player.getCurrentTime() - target);
         const playerIsPaused = player.getPlayerState() !== YT.PlayerState.PLAYING;
@@ -357,6 +388,7 @@ export default function YouTubePlayer({
     const paused = player.getPlayerState() !== window.YT?.PlayerState.PLAYING;
     if (paused) {
       if (isController) {
+        markExpectedBuffer();
         attemptPlay(player);
         broadcastPlay(player.getCurrentTime());
         return;
@@ -375,6 +407,7 @@ export default function YouTubePlayer({
     const player = playerRef.current;
     if (!player || !isController) return;
     const target = Math.max(0, Math.min(duration || Infinity, player.getCurrentTime() + delta));
+    markExpectedBuffer();
     player.seekTo(target, true);
     broadcastSeek(target, player.getPlayerState() === window.YT?.PlayerState.PLAYING);
   };
@@ -382,6 +415,7 @@ export default function YouTubePlayer({
   const handleSeekCommit = (value: number) => {
     const player = playerRef.current;
     if (!player || !isController) return;
+    markExpectedBuffer();
     player.seekTo(value, true);
     broadcastSeek(value, player.getPlayerState() === window.YT?.PlayerState.PLAYING);
   };
