@@ -5,6 +5,11 @@ export interface Room {
   movie_path: string | null;
   movie_title: string | null;
   movie_uploaded_at: string | null;
+  // 'file' (default) plays movie_path from the uploaded-movie library, as
+  // it always has. 'youtube' plays youtube_video_id via the IFrame API
+  // instead — movie_title is still used for display in both cases.
+  source_type: "file" | "youtube";
+  youtube_video_id: string | null;
   // The single source of truth for who controls playback — set once at
   // room creation to whoever hit "Start a room". Never changes hands.
   host_name: string | null;

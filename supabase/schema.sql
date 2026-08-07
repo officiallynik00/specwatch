@@ -19,6 +19,25 @@ create table if not exists rooms (
   total_watch_seconds double precision not null default 0
 );
 
+-- ── YouTube support ──
+-- source_type distinguishes an uploaded-file room from a YouTube-link
+-- room. movie_path/movie_title stay the source of truth for file rooms;
+-- youtube_video_id is used instead when source_type = 'youtube'.
+-- Defaulting existing rows to 'file' is exactly right — every room that
+-- exists today got here by uploading a movie.
+alter table rooms add column if not exists source_type text not null default 'file';
+alter table rooms add column if not exists youtube_video_id text;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'rooms_source_type_check'
+  ) then
+    alter table rooms add constraint rooms_source_type_check
+      check (source_type in ('file', 'youtube'));
+  end if;
+end $$;
+
 -- If rooms already existed with the old column name, rename it in place.
 do $$
 begin
