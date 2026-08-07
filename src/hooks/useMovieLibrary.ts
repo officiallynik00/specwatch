@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
-import type { Movie } from "@/lib/types";
+import type { Movie, Subtitle } from "@/lib/types";
 
 const MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5GB — well under B2's 10GB free-tier storage cap
 
@@ -213,7 +213,99 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       .eq("movie_path", movie.storage_path);
   }, []);
 
-  return { movies, loading, uploading, progress, error, addMovie, removeMovie };
+  const addSubtitle = useCallback(async (movie: Movie, file: File) => {
+    setError(null);
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (ext !== "vtt" && ext !== "srt") {
+      setError("Subtitles must be a .vtt or .srt file.");
+      return;
+    }
+
+    const subId = crypto.randomUUID();
+    const path = `${movie.storage_path.split("/")[0]}/${movie.id}/subs/${subId}.${ext}`;
+
+    let signedUrl: string;
+    try {
+      const res = await fetch("/api/r2-upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, contentType: "text/plain" }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.url) {
+        setError(`Couldn't start the subtitle upload: ${data.error || "unknown error"}`);
+        return;
+      }
+      signedUrl = data.url;
+    } catch {
+      setError("Couldn't reach the server to start the subtitle upload.");
+      return;
+    }
+
+    const { error: uploadError } = await uploadWithProgress(signedUrl, file, () => {});
+    if (uploadError) {
+      setError(`Subtitle upload failed: ${uploadError}`);
+      return;
+    }
+
+    const label = file.name.replace(/\.[^/.]+$/, "");
+    const newSubtitle: Subtitle = { id: subId, storage_path: path, label };
+    const subtitles = [...(movie.subtitles ?? []), newSubtitle];
+
+    const { error: updateError } = await supabase
+      .from("movies")
+      .update({ subtitles })
+      .eq("id", movie.id);
+
+    if (updateError) {
+      setError(`Uploaded the file but couldn't attach it: ${updateError.message}`);
+      return;
+    }
+    setMovies((prev) => prev.map((m) => (m.id === movie.id ? { ...m, subtitles } : m)));
+  }, []);
+
+  const removeSubtitle = useCallback(async (movie: Movie, subtitleId: string) => {
+    setError(null);
+    const target = movie.subtitles?.find((s) => s.id === subtitleId);
+    const subtitles = (movie.subtitles ?? []).filter((s) => s.id !== subtitleId);
+
+    // Optimistic — update local state first.
+    setMovies((prev) => prev.map((m) => (m.id === movie.id ? { ...m, subtitles } : m)));
+
+    const { error: updateError } = await supabase
+      .from("movies")
+      .update({ subtitles })
+      .eq("id", movie.id);
+    if (updateError) {
+      setError(`Couldn't remove the subtitle: ${updateError.message}`);
+      return;
+    }
+
+    if (target) {
+      try {
+        await fetch("/api/r2-delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: target.storage_path }),
+        });
+      } catch {
+        // Non-fatal — the DB reference is already gone, an orphaned
+        // object in B2 isn't visible to anyone.
+      }
+    }
+  }, []);
+
+  return {
+    movies,
+    loading,
+    uploading,
+    progress,
+    error,
+    addMovie,
+    removeMovie,
+    addSubtitle,
+    removeSubtitle,
+  };
 }
 
 export default useMovieLibrary;
