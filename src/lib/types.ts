@@ -14,6 +14,16 @@ export interface Room {
   total_watch_seconds: number;
 }
 
+// An external subtitle file (.vtt or .srt, converted to VTT client-side
+// on load) attached to a library movie. Uploaded separately from the
+// movie itself, via the same presigned B2 routes.
+export interface Subtitle {
+  id: string;
+  storage_path: string;
+  label: string; // shown in the CC menu, e.g. "English"
+  lang?: string; // optional BCP-47 code, e.g. "en"
+}
+
 // A single uploaded file in a room's persistent movie library. Distinct
 // from `Room.movie_path`, which just points at whichever library item is
 // currently loaded into the shared player.
@@ -24,6 +34,7 @@ export interface Movie {
   title: string;
   file_size_bytes: number | null;
   uploaded_at: string;
+  subtitles: Subtitle[];
 }
 
 export interface ChatMessage {
