@@ -5,6 +5,8 @@ import { supabase } from "@/lib/supabase/client";
 import type { ConnectionStatus } from "@/hooks/useRoomSync";
 import type { ChatMessage, Room, SyncEvent, Subtitle } from "@/lib/types";
 import FullscreenChatOverlay from "@/components/FullscreenChatOverlay";
+import EmojiOverlay, { type FloatingBubble } from "@/components/EmojiOverlay";
+import type { PttStatus } from "@/hooks/usePushToTalk";
 
 const SMALL_DRIFT_THRESHOLD = 0.5; // seconds — corrected via a gentle playbackRate nudge
 const LARGE_DRIFT_THRESHOLD = 1.5; // seconds — hard resync + visible status
@@ -63,6 +65,23 @@ interface VideoPlayerProps {
   onEmoji: (emoji: string, by: string) => void;
   chatMessages: ChatMessage[];
   onSendChat: (body: string) => void;
+  // Reactions — floating bubbles + quick-tap bar are owned by PlayerScreen
+  // (shared with the non-fullscreen layout) and just rendered here too so
+  // they're visible inside the Fullscreen API's element, same reasoning
+  // as FullscreenChatOverlay above.
+  bubbles: FloatingBubble[];
+  onTapEmoji: (emoji: string) => void;
+  onRemoveBubble: (id: string) => void;
+  // Push-to-talk — optional so this component doesn't hard-require voice
+  // wiring (e.g. if a future caller doesn't have it set up).
+  ptt?: {
+    status: PttStatus;
+    isTalking: boolean;
+    partnerTalking: boolean;
+    error: string | null;
+    onStart: () => void;
+    onStop: () => void;
+  };
 }
 
 function formatTime(seconds: number): string {
@@ -91,6 +110,10 @@ export default function VideoPlayer({
   onEmoji,
   chatMessages,
   onSendChat,
+  bubbles,
+  onTapEmoji,
+  onRemoveBubble,
+  ptt,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -105,6 +128,28 @@ export default function VideoPlayer({
   const [pipSupported, setPipSupported] = useState(false);
   const [fullscreenChatEnabled, setFullscreenChatEnabled] = useState(true);
   const [fsControlsVisible, setFsControlsVisible] = useState(true);
+  // Guards the fullscreen mic button against a duplicate onStop firing
+  // (pointerup + pointerleave both landing) — same pattern PushToTalkButton
+  // uses for its windowed-mode button.
+  const micHeldRef = useRef(false);
+  const handleMicDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (!ptt || ptt.status !== "connected" || micHeldRef.current) return;
+      e.preventDefault();
+      micHeldRef.current = true;
+      ptt.onStart();
+    },
+    [ptt]
+  );
+  const handleMicUp = useCallback(
+    (e: React.PointerEvent) => {
+      if (!ptt || !micHeldRef.current) return;
+      e.preventDefault();
+      micHeldRef.current = false;
+      ptt.onStop();
+    },
+    [ptt]
+  );
   // True when a programmatic video.play() (triggered by a sync event, not a
   // click) got rejected by the browser's autoplay policy. This happens to
   // followers fairly often — the host's Play click is a real user gesture,
@@ -1041,6 +1086,80 @@ useEffect(() => {
           />
         )}
 
+        {/* Fullscreen reactions: floating bubbles + quick-tap bar, embedded
+            in this element's subtree for the same reason as the chat
+            overlay above — bubbles/quick-tap live one level up in
+            PlayerScreen normally, but outside the Fullscreen API's target
+            element they'd simply be invisible while fullscreen. */}
+        {isFullscreen && (
+          <div className="pointer-events-none absolute inset-0 z-10">
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-full overflow-hidden">
+              {bubbles.map((b) => (
+                <span
+                  key={b.id}
+                  onAnimationEnd={() => onRemoveBubble(b.id)}
+                  className="absolute bottom-24 flex animate-floatUp items-end gap-0.5 text-4xl drop-shadow-lg"
+                  style={{ left: `${b.left}%` }}
+                >
+                  {b.emoji}
+                  {b.count && b.count > 1 && (
+                    <span className="mb-1 rounded-full bg-black/60 px-1.5 py-0.5 text-xs font-bold text-reel-text">
+                      ×{b.count}
+                    </span>
+                  )}
+                </span>
+              ))}
+            </div>
+            <div className="pointer-events-auto absolute bottom-3 left-1/2 flex -translate-x-1/2 flex-wrap justify-center gap-1.5 rounded-full bg-black/30 px-2 py-1.5 backdrop-blur-sm">
+              {["❤️", "😂", "😮", "🔥", "👏", "😢"].map((emoji) => (
+                <button
+                  key={emoji}
+                  onClick={() => onTapEmoji(emoji)}
+                  className="rounded-full px-1.5 py-1 text-lg transition hover:scale-110 active:scale-95"
+                  aria-label={`React with ${emoji}`}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Mic (push-to-talk) — small transparent icon, opposite corner
+            from the chat toggle below, reachable in both fullscreen
+            orientations since it's corner-anchored to this element, which
+            fills the screen in both portrait and landscape. */}
+        {isFullscreen && ptt && (
+          <div className="absolute left-3 top-3 flex gap-2">
+            <button
+              onPointerDown={handleMicDown}
+              onPointerUp={handleMicUp}
+              onPointerLeave={handleMicUp}
+              onPointerCancel={handleMicUp}
+              onContextMenu={(e) => e.preventDefault()}
+              disabled={ptt.status !== "connected"}
+              aria-pressed={ptt.isTalking}
+              aria-label={ptt.isTalking ? "Release to stop talking" : "Hold to talk"}
+              title={
+                ptt.error ??
+                (ptt.status !== "connected" ? "Voice unavailable" : ptt.isTalking ? "Talking…" : "Hold to talk")
+              }
+              className={`flex h-8 w-8 select-none items-center justify-center rounded-full backdrop-blur transition ${
+                ptt.status !== "connected"
+                  ? "cursor-not-allowed bg-black/30 text-reel-text/40"
+                  : ptt.isTalking
+                    ? "bg-reel-amber text-reel-bg animate-pulseGlow"
+                    : ptt.partnerTalking
+                      ? "bg-black/30 text-reel-amber"
+                      : "bg-black/30 text-reel-text hover:bg-black/50"
+              }`}
+              style={{ touchAction: "none" }}
+            >
+              <span className="text-sm">{ptt.isTalking ? "🔴" : "🎙️"}</span>
+            </button>
+          </div>
+        )}
+
         {/* Fullscreen / PiP / chat-toggle controls float over the video
             itself so they're reachable even while the bottom control bar
             is off-screen in fullscreen mode. */}
@@ -1054,7 +1173,7 @@ useEffect(() => {
               className={`flex h-8 w-8 items-center justify-center rounded-full backdrop-blur transition ${
                 fullscreenChatEnabled
                   ? "bg-reel-amber text-reel-bg"
-                  : "bg-black/60 text-reel-text hover:bg-black/80"
+                  : "bg-black/30 text-reel-text hover:bg-black/50"
               }`}
             >
               <svg

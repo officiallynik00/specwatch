@@ -210,6 +210,17 @@ export default function PlayerScreen() {
             onEmoji={handleRemoteEmoji}
             chatMessages={messages}
             onSendChat={handleSendChat}
+            bubbles={bubbles}
+            onTapEmoji={handleTapEmoji}
+            onRemoveBubble={removeBubble}
+            ptt={{
+              status: ptt.status,
+              isTalking: ptt.isTalking,
+              partnerTalking: ptt.partnerTalking,
+              error: ptt.error,
+              onStart: ptt.startTalking,
+              onStop: ptt.stopTalking,
+            }}
           />
         )}
         <EmojiOverlay bubbles={bubbles} onRemove={removeBubble} onTap={handleTapEmoji} />
