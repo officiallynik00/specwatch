@@ -57,7 +57,7 @@ export default function FullscreenChatOverlay({ messages, myName, onSend, onDisa
   };
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-start gap-1.5 px-3 pb-20 sm:px-4 sm:pb-24">
+    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-start gap-1.5 px-3 pb-[calc(env(safe-area-inset-bottom)+5rem)] sm:px-4 sm:pb-[calc(env(safe-area-inset-bottom)+6rem)]">
       {/* Floating lines — fade in, hold, fade out, self-remove. Capped
           width + clamp so one long message never covers much of the frame. */}
       <div className="flex w-full max-w-[78vw] flex-col gap-1.5 sm:max-w-sm">

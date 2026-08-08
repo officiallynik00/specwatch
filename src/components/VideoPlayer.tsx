@@ -150,6 +150,18 @@ export default function VideoPlayer({
     },
     [ptt]
   );
+  // The mic button only exists in the fullscreen subtree — if the person
+  // exits fullscreen mid-press, it unmounts without a pointerup ever
+  // firing, so onStop() would never run and the ref would stay stuck
+  // "held" (silently blocking the next press, and possibly leaving the
+  // mic open on the partner's end). Catch that transition explicitly.
+  useEffect(() => {
+    if (!isFullscreen && micHeldRef.current) {
+      micHeldRef.current = false;
+      ptt?.onStop();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFullscreen]);
   // True when a programmatic video.play() (triggered by a sync event, not a
   // click) got rejected by the browser's autoplay policy. This happens to
   // followers fairly often — the host's Play click is a real user gesture,
@@ -802,7 +814,7 @@ useEffect(() => {
     <div
       className={
         overlay
-          ? `absolute inset-x-0 bottom-0 z-10 flex flex-wrap items-center gap-2 bg-gradient-to-t from-black/85 via-black/50 to-transparent px-3 pb-3 pt-10 transition-opacity duration-500 sm:gap-3 sm:px-5 sm:pb-4 ${
+          ? `absolute inset-x-0 bottom-0 z-10 flex flex-wrap items-center gap-2 bg-gradient-to-t from-black/85 via-black/50 to-transparent px-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] pt-10 transition-opacity duration-500 sm:gap-3 sm:px-5 sm:pb-[calc(env(safe-area-inset-bottom)+1rem)] ${
               fsControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
             }`
           : "mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-reel-border bg-reel-surface px-3 py-2.5 sm:gap-3 sm:px-4 sm:py-3"
@@ -1086,11 +1098,16 @@ useEffect(() => {
           />
         )}
 
-        {/* Fullscreen reactions: floating bubbles + quick-tap bar, embedded
-            in this element's subtree for the same reason as the chat
-            overlay above — bubbles/quick-tap live one level up in
-            PlayerScreen normally, but outside the Fullscreen API's target
-            element they'd simply be invisible while fullscreen. */}
+        {/* Fullscreen reactions: floating bubbles (decorative, pass-through)
+            + a quick-tap bar, embedded in this element's subtree for the
+            same reason as the chat overlay above.
+            The tap bar is a vertical strip on the right edge rather than
+            a bottom-center pill on purpose: bottom-center collides with
+            both the control bar (bottom-0) and the chat input pill
+            (also bottom-anchored) whenever either is visible. Anchoring
+            to the vertical center of the right edge stays clear of both
+            in portrait AND landscape, and doesn't need to track the
+            control bar's show/hide state. */}
         {isFullscreen && (
           <div className="pointer-events-none absolute inset-0 z-10">
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-full overflow-hidden">
@@ -1110,12 +1127,15 @@ useEffect(() => {
                 </span>
               ))}
             </div>
-            <div className="pointer-events-auto absolute bottom-3 left-1/2 flex -translate-x-1/2 flex-wrap justify-center gap-1.5 rounded-full bg-black/30 px-2 py-1.5 backdrop-blur-sm">
+            <div
+              className="pointer-events-auto absolute right-2 top-1/2 flex -translate-y-1/2 flex-col items-center gap-2.5 rounded-full bg-black/30 px-1.5 py-2.5 backdrop-blur-sm sm:right-3 sm:gap-3 sm:px-2 sm:py-3"
+              style={{ marginRight: "env(safe-area-inset-right)" }}
+            >
               {["❤️", "😂", "😮", "🔥", "👏", "😢"].map((emoji) => (
                 <button
                   key={emoji}
                   onClick={() => onTapEmoji(emoji)}
-                  className="rounded-full px-1.5 py-1 text-lg transition hover:scale-110 active:scale-95"
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-xl transition hover:scale-110 active:scale-95 sm:h-9 sm:w-9 sm:text-2xl"
                   aria-label={`React with ${emoji}`}
                 >
                   {emoji}
@@ -1130,7 +1150,10 @@ useEffect(() => {
             orientations since it's corner-anchored to this element, which
             fills the screen in both portrait and landscape. */}
         {isFullscreen && ptt && (
-          <div className="absolute left-3 top-3 flex gap-2">
+          <div
+            className="absolute left-2 top-2 flex gap-2 sm:left-3 sm:top-3"
+            style={{ marginLeft: "env(safe-area-inset-left)", marginTop: "env(safe-area-inset-top)" }}
+          >
             <button
               onPointerDown={handleMicDown}
               onPointerUp={handleMicUp}
@@ -1144,7 +1167,7 @@ useEffect(() => {
                 ptt.error ??
                 (ptt.status !== "connected" ? "Voice unavailable" : ptt.isTalking ? "Talking…" : "Hold to talk")
               }
-              className={`flex h-8 w-8 select-none items-center justify-center rounded-full backdrop-blur transition ${
+              className={`flex h-9 w-9 select-none items-center justify-center rounded-full backdrop-blur transition sm:h-8 sm:w-8 ${
                 ptt.status !== "connected"
                   ? "cursor-not-allowed bg-black/30 text-reel-text/40"
                   : ptt.isTalking
@@ -1163,14 +1186,21 @@ useEffect(() => {
         {/* Fullscreen / PiP / chat-toggle controls float over the video
             itself so they're reachable even while the bottom control bar
             is off-screen in fullscreen mode. */}
-        <div className="absolute right-3 top-3 flex gap-2">
+        <div
+          className="absolute right-2 top-2 flex gap-2 sm:right-3 sm:top-3"
+          style={
+            isFullscreen
+              ? { marginRight: "env(safe-area-inset-right)", marginTop: "env(safe-area-inset-top)" }
+              : undefined
+          }
+        >
           {isFullscreen && (
             <button
               onClick={() => setFullscreenChatEnabled((v) => !v)}
               aria-label={fullscreenChatEnabled ? "Disable chat" : "Enable chat"}
               aria-pressed={fullscreenChatEnabled}
               title={fullscreenChatEnabled ? "Disable chat" : "Enable chat"}
-              className={`flex h-8 w-8 items-center justify-center rounded-full backdrop-blur transition ${
+              className={`flex h-9 w-9 items-center justify-center rounded-full backdrop-blur transition sm:h-8 sm:w-8 ${
                 fullscreenChatEnabled
                   ? "bg-reel-amber text-reel-bg"
                   : "bg-black/30 text-reel-text hover:bg-black/50"
@@ -1192,7 +1222,7 @@ useEffect(() => {
               onClick={togglePiP}
               aria-label={isPiP ? "Exit mini-player" : "Open mini-player"}
               title={isPiP ? "Exit mini-player" : "Mini-player"}
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-reel-text backdrop-blur transition hover:bg-black/80"
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-reel-text backdrop-blur transition hover:bg-black/80 sm:h-8 sm:w-8"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -1210,7 +1240,7 @@ useEffect(() => {
             onClick={toggleFullscreen}
             aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
             title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-reel-text backdrop-blur transition hover:bg-black/80"
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-reel-text backdrop-blur transition hover:bg-black/80 sm:h-8 sm:w-8"
           >
             {isFullscreen ? (
               <svg
