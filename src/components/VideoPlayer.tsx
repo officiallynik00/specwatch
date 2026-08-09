@@ -81,6 +81,7 @@ interface VideoPlayerProps {
     error: string | null;
     onStart: () => void;
     onStop: () => void;
+    onRetry: () => void;
   };
 }
 
@@ -128,6 +129,13 @@ export default function VideoPlayer({
   const [pipSupported, setPipSupported] = useState(false);
   const [fullscreenChatEnabled, setFullscreenChatEnabled] = useState(true);
   const [fsControlsVisible, setFsControlsVisible] = useState(true);
+  // Volume ducking while either side is on push-to-talk. No custom
+  // volume slider exists elsewhere in this component, so "full" is
+  // just the video element's default of 1.0.
+  const NORMAL_VOLUME = 1;
+  const DUCK_VOLUME = 0.22;
+  const DUCK_MS = 220;
+  const duckRafRef = useRef<number | null>(null);
   // Guards the fullscreen mic button against a duplicate onStop firing
   // (pointerup + pointerleave both landing) — same pattern PushToTalkButton
   // uses for its windowed-mode button.
@@ -137,6 +145,11 @@ export default function VideoPlayer({
       if (!ptt || ptt.status !== "connected" || micHeldRef.current) return;
       e.preventDefault();
       micHeldRef.current = true;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // Best-effort — see PushToTalkButton for why this matters on touch.
+      }
       ptt.onStart();
     },
     [ptt]
@@ -146,6 +159,11 @@ export default function VideoPlayer({
       if (!ptt || !micHeldRef.current) return;
       e.preventDefault();
       micHeldRef.current = false;
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // Already released or never captured — fine either way.
+      }
       ptt.onStop();
     },
     [ptt]
@@ -162,6 +180,44 @@ export default function VideoPlayer({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFullscreen]);
+
+  // Duck the movie's volume while either person is on push-to-talk, so a
+  // comment mid-scene doesn't mean shouting over the soundtrack. Ramps
+  // smoothly rather than jumping, since an instant volume cut/restore
+  // reads as jarring — same reasoning apps like Spotify use for
+  // notification ducking.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const target = ptt?.isTalking || ptt?.partnerTalking ? DUCK_VOLUME : NORMAL_VOLUME;
+    if (duckRafRef.current !== null) cancelAnimationFrame(duckRafRef.current);
+
+    const start = video.volume;
+    if (Math.abs(start - target) < 0.001) return;
+    const startTime = performance.now();
+
+    const step = (now: number) => {
+      const video2 = videoRef.current;
+      if (!video2) return;
+      const t = Math.min(1, (now - startTime) / DUCK_MS);
+      // Smoothstep easing — gentler at both ends than a linear ramp.
+      const eased = t * t * (3 - 2 * t);
+      video2.volume = start + (target - start) * eased;
+      if (t < 1) {
+        duckRafRef.current = requestAnimationFrame(step);
+      } else {
+        duckRafRef.current = null;
+      }
+    };
+    duckRafRef.current = requestAnimationFrame(step);
+
+    return () => {
+      if (duckRafRef.current !== null) {
+        cancelAnimationFrame(duckRafRef.current);
+        duckRafRef.current = null;
+      }
+    };
+  }, [ptt?.isTalking, ptt?.partnerTalking]);
   // True when a programmatic video.play() (triggered by a sync event, not a
   // click) got rejected by the browser's autoplay policy. This happens to
   // followers fairly often — the host's Play click is a real user gesture,
@@ -1155,30 +1211,40 @@ useEffect(() => {
             style={{ marginLeft: "env(safe-area-inset-left)", marginTop: "env(safe-area-inset-top)" }}
           >
             <button
-              onPointerDown={handleMicDown}
-              onPointerUp={handleMicUp}
-              onPointerLeave={handleMicUp}
-              onPointerCancel={handleMicUp}
+              onPointerDown={ptt.status === "failed" ? undefined : handleMicDown}
+              onPointerUp={ptt.status === "failed" ? undefined : handleMicUp}
+              onPointerCancel={ptt.status === "failed" ? undefined : handleMicUp}
+              onClick={ptt.status === "failed" ? ptt.onRetry : undefined}
               onContextMenu={(e) => e.preventDefault()}
-              disabled={ptt.status !== "connected"}
+              disabled={ptt.status !== "connected" && ptt.status !== "failed"}
               aria-pressed={ptt.isTalking}
-              aria-label={ptt.isTalking ? "Release to stop talking" : "Hold to talk"}
+              aria-label={
+                ptt.status === "failed"
+                  ? "Retry voice connection"
+                  : ptt.isTalking
+                    ? "Release to stop talking"
+                    : "Hold to talk"
+              }
               title={
-                ptt.error ??
-                (ptt.status !== "connected" ? "Voice unavailable" : ptt.isTalking ? "Talking…" : "Hold to talk")
+                ptt.status === "failed"
+                  ? "Voice unavailable — tap to retry"
+                  : (ptt.error ??
+                    (ptt.status !== "connected" ? "Voice unavailable" : ptt.isTalking ? "Talking…" : "Hold to talk"))
               }
               className={`flex h-9 w-9 select-none items-center justify-center rounded-full backdrop-blur transition sm:h-8 sm:w-8 ${
-                ptt.status !== "connected"
-                  ? "cursor-not-allowed bg-black/30 text-reel-text/40"
-                  : ptt.isTalking
-                    ? "bg-reel-amber text-reel-bg animate-pulseGlow"
-                    : ptt.partnerTalking
-                      ? "bg-black/30 text-reel-amber"
-                      : "bg-black/30 text-reel-text hover:bg-black/50"
+                ptt.status === "failed"
+                  ? "bg-reel-rose/20 text-reel-rose hover:bg-reel-rose/30"
+                  : ptt.status !== "connected"
+                    ? "cursor-not-allowed bg-black/30 text-reel-text/40"
+                    : ptt.isTalking
+                      ? "bg-reel-amber text-reel-bg animate-pulseGlow"
+                      : ptt.partnerTalking
+                        ? "bg-black/30 text-reel-amber"
+                        : "bg-black/30 text-reel-text hover:bg-black/50"
               }`}
               style={{ touchAction: "none" }}
             >
-              <span className="text-sm">{ptt.isTalking ? "🔴" : "🎙️"}</span>
+              <span className="text-sm">{ptt.status === "failed" ? "↻" : ptt.isTalking ? "🔴" : "🎙️"}</span>
             </button>
           </div>
         )}

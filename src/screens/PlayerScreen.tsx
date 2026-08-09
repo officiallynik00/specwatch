@@ -220,6 +220,7 @@ export default function PlayerScreen() {
               error: ptt.error,
               onStart: ptt.startTalking,
               onStop: ptt.stopTalking,
+              onRetry: ptt.retry,
             }}
           />
         )}
@@ -246,6 +247,7 @@ export default function PlayerScreen() {
         partnerName={sync.partnerName}
         onStart={ptt.startTalking}
         onStop={ptt.stopTalking}
+        onRetry={ptt.retry}
       />
     </main>
   );

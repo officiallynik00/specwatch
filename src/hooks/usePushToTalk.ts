@@ -65,6 +65,10 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
   const remoteAudioElRef = useRef<HTMLAudioElement | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const makingOfferRef = useRef(false);
+  // Safety net for bug #4 below: if a "stopped talking" broadcast is ever
+  // lost (tab crash, connection drop mid-press), this force-clears the
+  // partner-talking indicator instead of leaving it stuck forever.
+  const partnerTalkingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const supported =
     typeof window !== "undefined" && !!window.RTCPeerConnection && !!navigator.mediaDevices?.getUserMedia;
@@ -117,6 +121,10 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
     pendingCandidatesRef.current = [];
     makingOfferRef.current = false;
     detachRemoteStream();
+    if (partnerTalkingTimeoutRef.current) {
+      clearTimeout(partnerTalkingTimeoutRef.current);
+      partnerTalkingTimeoutRef.current = null;
+    }
     setPartnerTalking(false);
   }, [detachRemoteStream]);
 
@@ -245,7 +253,19 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
     channel.on("broadcast", { event: "ice" }, ({ payload }) => handleIce(payload as SignalPayload));
     channel.on("broadcast", { event: "talk" }, ({ payload }) => {
       const p = payload as SignalPayload;
-      if (p.from !== myName) setPartnerTalking(!!p.talking);
+      if (p.from === myName) return;
+      if (partnerTalkingTimeoutRef.current) {
+        clearTimeout(partnerTalkingTimeoutRef.current);
+        partnerTalkingTimeoutRef.current = null;
+      }
+      setPartnerTalking(!!p.talking);
+      if (p.talking) {
+        // If the matching "talk: false" never arrives (their tab closed,
+        // connection dropped mid-press), don't leave the indicator stuck
+        // on indefinitely — presence will eventually catch a real
+        // disconnect, but this covers the gap before that happens.
+        partnerTalkingTimeoutRef.current = setTimeout(() => setPartnerTalking(false), 15000);
+      }
     });
 
     channel.subscribe();
@@ -287,18 +307,42 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
       if (!localStreamRef.current) {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         localStreamRef.current = stream;
-        const track = stream.getAudioTracks()[0];
+      }
+      const track = localStreamRef.current.getAudioTracks()[0];
+      // Attach on every call, not just the first ever — a reconnect
+      // (partner rejoining, ICE restart, etc.) creates a brand-new
+      // RTCPeerConnection and RTCRtpSender, but the mic stream itself is
+      // only requested once per session. Without re-attaching here, a
+      // fresh sender would carry no track at all and the partner would
+      // hear silence, even though everything looks "connected" locally.
+      // replaceTrack is safe to call repeatedly; the `!==` check just
+      // avoids a redundant call on the common case (same sender, same
+      // track, held again).
+      if (audioSenderRef.current.track !== track) {
         await audioSenderRef.current.replaceTrack(track);
       }
-      localStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = true));
+      track.enabled = true;
       setIsTalking(true);
       channelRef.current?.send({
         type: "broadcast",
         event: "talk",
         payload: { from: myName, talking: true } satisfies SignalPayload,
       });
-    } catch {
-      setError("Couldn't access your microphone — check your browser's site permissions.");
+    } catch (err) {
+      // Distinguish the actual failure instead of always blaming the mic —
+      // getUserMedia and replaceTrack fail for different reasons, and a
+      // bare catch was previously showing a permissions message even when
+      // the real problem was the WebRTC connection.
+      const name = err instanceof DOMException ? err.name : undefined;
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        setError("Microphone access was blocked — check your browser's site permissions.");
+      } else if (name === "NotFoundError") {
+        setError("No microphone was found on this device.");
+      } else if (name === "NotReadableError") {
+        setError("Your microphone is already in use by another app.");
+      } else {
+        setError("Couldn't start the voice connection. Try again.");
+      }
     }
   }, [myName]);
 
@@ -312,5 +356,10 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
     });
   }, [myName]);
 
-  return { status, isTalking, partnerTalking, error, startTalking, stopTalking };
+  const retry = useCallback(() => {
+    teardownConnection();
+    setupConnection();
+  }, [teardownConnection, setupConnection]);
+
+  return { status, isTalking, partnerTalking, error, startTalking, stopTalking, retry };
 }
