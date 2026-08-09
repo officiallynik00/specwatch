@@ -69,6 +69,35 @@ input[type="range"].seekbar::-moz-range-thumb {
   cursor: pointer;
 }
 
+/* Custom range input styling for the volume slider — same look as the
+   seek bar, just smaller since it sits inline in the control bar. */
+input[type="range"].volumebar {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  border-radius: 999px;
+  background: #2a2e3d;
+  outline: none;
+}
+input[type="range"].volumebar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: #e8a548;
+  cursor: pointer;
+  box-shadow: 0 0 0 3px rgba(232, 165, 72, 0.15);
+}
+input[type="range"].volumebar::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: none;
+  border-radius: 999px;
+  background: #e8a548;
+  cursor: pointer;
+}
+
 ::selection {
   background: #e8a548;
   color: #0a0b10;

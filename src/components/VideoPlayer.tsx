@@ -10,8 +10,8 @@ import type { PttStatus } from "@/hooks/usePushToTalk";
 
 const SMALL_DRIFT_THRESHOLD = 0.5; // seconds — corrected via a gentle playbackRate nudge
 const LARGE_DRIFT_THRESHOLD = 1.5; // seconds — hard resync + visible status
-const NUDGE_RATE_FAST = 1.06; // used when we're behind the controller
-const NUDGE_RATE_SLOW = 0.94; // used when we're ahead of the controller
+const NUDGE_RATE_FAST = 1.06; // multiplier applied on top of the chosen speed
+const NUDGE_RATE_SLOW = 0.94; // multiplier applied on top of the chosen speed
 
 // audioTracks isn't in TS's lib.dom.d.ts (it's Chrome/Edge/Safari-only,
 // not standardized) — this is the minimal shape we actually use.
@@ -129,11 +129,26 @@ export default function VideoPlayer({
   const [pipSupported, setPipSupported] = useState(false);
   const [fullscreenChatEnabled, setFullscreenChatEnabled] = useState(true);
   const [fsControlsVisible, setFsControlsVisible] = useState(true);
-  // Volume ducking while either side is on push-to-talk. No custom
-  // volume slider exists elsewhere in this component, so "full" is
-  // just the video element's default of 1.0.
-  const NORMAL_VOLUME = 1;
-  const DUCK_VOLUME = 0.22;
+  // Volume: separate from ducking below. This is the user's *chosen*
+  // level; ducking temporarily dips below it and returns to it, rather
+  // than always jumping back to a hardcoded 1.0.
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  const preMuteVolumeRef = useRef(1);
+  // Playback speed. Kept in a ref too (baseRateRef) so the drift-
+  // correction logic below can read the current value without needing
+  // it in every effect's dependency array — those effects fire on sync
+  // events, not on speed changes, and should just pick up whatever the
+  // latest chosen speed is at the time.
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const baseRateRef = useRef(1);
+  const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
+  const [volumeMenuOpen, setVolumeMenuOpen] = useState(false);
+  // Volume ducking while either side is on push-to-talk. Ducks to a
+  // fraction of whatever the person chose with the volume slider (not a
+  // fixed absolute level), so it dips proportionally whether they're
+  // normally at 100% or already listening quietly.
+  const DUCK_RATIO = 0.22;
   const DUCK_MS = 220;
   const duckRafRef = useRef<number | null>(null);
   // Guards the fullscreen mic button against a duplicate onStop firing
@@ -189,11 +204,15 @@ export default function VideoPlayer({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const target = ptt?.isTalking || ptt?.partnerTalking ? DUCK_VOLUME : NORMAL_VOLUME;
+    const chosenVolume = muted ? 0 : volume;
+    const target = ptt?.isTalking || ptt?.partnerTalking ? chosenVolume * DUCK_RATIO : chosenVolume;
     if (duckRafRef.current !== null) cancelAnimationFrame(duckRafRef.current);
 
     const start = video.volume;
-    if (Math.abs(start - target) < 0.001) return;
+    if (Math.abs(start - target) < 0.001) {
+      video.volume = target;
+      return;
+    }
     const startTime = performance.now();
 
     const step = (now: number) => {
@@ -217,7 +236,7 @@ export default function VideoPlayer({
         duckRafRef.current = null;
       }
     };
-  }, [ptt?.isTalking, ptt?.partnerTalking]);
+  }, [ptt?.isTalking, ptt?.partnerTalking, volume, muted]);
   // True when a programmatic video.play() (triggered by a sync event, not a
   // click) got rejected by the browser's autoplay policy. This happens to
   // followers fairly often — the host's Play click is a real user gesture,
@@ -449,16 +468,18 @@ useEffect(() => {
 
   // Close the audio/subtitle dropdowns on any click outside them.
   useEffect(() => {
-    if (!audioMenuOpen && !subsMenuOpen) return;
+    if (!audioMenuOpen && !subsMenuOpen && !speedMenuOpen && !volumeMenuOpen) return;
     const onClick = (e: MouseEvent) => {
       if (avMenuWrapRef.current && !avMenuWrapRef.current.contains(e.target as Node)) {
         setAudioMenuOpen(false);
         setSubsMenuOpen(false);
+        setSpeedMenuOpen(false);
+        setVolumeMenuOpen(false);
       }
     };
     window.addEventListener("mousedown", onClick);
     return () => window.removeEventListener("mousedown", onClick);
-  }, [audioMenuOpen, subsMenuOpen]);
+  }, [audioMenuOpen, subsMenuOpen, speedMenuOpen, volumeMenuOpen]);
 
   const handleSelectAudioTrack = useCallback((id: string) => {
     const video = videoRef.current as MediaElementWithAudioTracks | null;
@@ -468,6 +489,34 @@ useEffect(() => {
     setSelectedAudioId(id);
     setAudioMenuOpen(false);
   }, []);
+
+  // Playback speed is a deliberate, immediate user choice — applied
+  // directly rather than eased — but drift correction (above) needs to
+  // keep nudging *around* whatever this is set to, not fight it back to
+  // 1x. baseRateRef is what that code reads.
+  const handleSelectSpeed = useCallback((speed: number) => {
+    setPlaybackSpeed(speed);
+    baseRateRef.current = speed;
+    if (videoRef.current) videoRef.current.playbackRate = speed;
+    setSpeedMenuOpen(false);
+  }, []);
+
+  const handleVolumeChange = useCallback((value: number) => {
+    setVolume(value);
+    if (value > 0 && muted) setMuted(false);
+    if (value === 0 && !muted) setMuted(true);
+  }, [muted]);
+
+  const handleToggleMute = useCallback(() => {
+    setMuted((m) => {
+      if (!m) {
+        preMuteVolumeRef.current = volume > 0 ? volume : 1;
+      } else if (volume === 0) {
+        setVolume(preMuteVolumeRef.current);
+      }
+      return !m;
+    });
+  }, [volume]);
 
   
 
@@ -536,7 +585,7 @@ useEffect(() => {
         }
 
         if (gap >= LARGE_DRIFT_THRESHOLD) {
-          video.playbackRate = 1;
+          video.playbackRate = baseRateRef.current;
           setResyncing(true);
           video.currentTime = target;
           showNote("Resyncing…");
@@ -545,10 +594,14 @@ useEffect(() => {
           // Smooth catch-up: nudge playback speed slightly instead of
           // hard-jumping currentTime every heartbeat, which reads as a
           // visible stutter. The rate resets once the gap closes below
-          // the threshold.
-          video.playbackRate = target > video.currentTime ? NUDGE_RATE_FAST : NUDGE_RATE_SLOW;
-        } else if (video.playbackRate !== 1) {
-          video.playbackRate = 1;
+          // the threshold. Nudge is a multiplier on the chosen speed,
+          // not an absolute rate, so catch-up still respects e.g. 1.5x.
+          video.playbackRate =
+            target > video.currentTime
+              ? baseRateRef.current * NUDGE_RATE_FAST
+              : baseRateRef.current * NUDGE_RATE_SLOW;
+        } else if (Math.abs(video.playbackRate - baseRateRef.current) > 0.001) {
+          video.playbackRate = baseRateRef.current;
         }
         break;
       }
@@ -556,14 +609,14 @@ useEffect(() => {
         if (isController) break;
         lastAuthoritativeSentAtRef.current = lastEvent.serverSentAt;
         const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, true);
-        video.playbackRate = 1;
+        video.playbackRate = baseRateRef.current;
         video.currentTime = target;
         video.play().catch(() => setNeedsPlayGesture(true));
         break;
       }
       case "pause": {
         lastAuthoritativeSentAtRef.current = lastEvent.serverSentAt;
-        video.playbackRate = 1;
+        video.playbackRate = baseRateRef.current;
         video.pause();
         video.currentTime = lastEvent.currentTime;
         setNeedsPlayGesture(false);
@@ -576,7 +629,7 @@ useEffect(() => {
         // Use the host's REAL play state at the moment of the seek,
         // instead of guessing from our own (possibly stale) local state.
         const target = compensate(lastEvent.currentTime, lastEvent.serverSentAt, lastEvent.isPlaying);
-        video.playbackRate = 1;
+        video.playbackRate = baseRateRef.current;
         video.currentTime = target;
         break;
       }
@@ -597,7 +650,7 @@ useEffect(() => {
 
     if (connectionStatus === "partner-away" || connectionStatus === "reconnecting") {
       video.pause();
-      video.playbackRate = 1;
+      video.playbackRate = baseRateRef.current;
       showNote(
         connectionStatus === "reconnecting"
           ? "Connection interrupted — reconnecting…"
@@ -805,6 +858,30 @@ useEffect(() => {
     }
   }, []);
 
+  // ── "Background audio" ──
+  // Plain <video> playback on the web has no dedicated "keep the audio
+  // going after backgrounding" permission — what actually keeps it alive
+  // depends on the browser/OS. Picture-in-Picture is the one mechanism
+  // that reliably works across both Android Chrome and iOS Safari (PiP
+  // audio survives switching apps or locking the screen; a background
+  // tab alone does not, especially on iOS). So: if playback is active
+  // and the tab is hidden, auto-enter PiP rather than requiring the
+  // person to have already tapped the PiP button themselves.
+  useEffect(() => {
+    const handleVisibility = () => {
+      const video = videoRef.current;
+      if (document.hidden && video && !video.paused && pipSupported && !document.pictureInPictureElement) {
+        video.requestPictureInPicture().catch(() => {
+          // Browser refused (needs a recent user gesture on some
+          // browsers, or PiP is mid-transition already) — the person
+          // can still enter it manually with the PiP button.
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [pipSupported]);
+
   // ── Media Session — lock-screen / notification-tray controls so playback
   // stays controllable (and shows correct now-playing info) when the tab is
   // backgrounded or the phone screen is off. ──
@@ -858,7 +935,7 @@ useEffect(() => {
     try {
       navigator.mediaSession.setPositionState({
         duration,
-        playbackRate: 1,
+        playbackRate: baseRateRef.current,
         position: Math.min(current, duration),
       });
     } catch {
@@ -939,11 +1016,89 @@ useEffect(() => {
         </span>
       </div>
 
-      {/* Audio track / subtitle pickers — purely local to each viewer,
-          so these are available regardless of who's controlling playback. */}
-      {(audioTracks.length > 1 || subtitleMeta.length > 0 || embeddedTracks.length > 0) && (
-        <div ref={avMenuWrapRef} className="flex shrink-0 items-center gap-1.5">
-          {audioTracks.length > 1 && (
+      {/* Volume, speed, audio track, and subtitle controls — purely local
+          to each viewer, so all of these are available regardless of who's
+          controlling playback. */}
+      <div ref={avMenuWrapRef} className="flex shrink-0 items-center gap-1.5">
+        {/* Volume */}
+        <div className="relative flex items-center">
+          <button
+            onClick={handleToggleMute}
+            onDoubleClick={() => setVolumeMenuOpen((v) => !v)}
+            aria-label={muted || volume === 0 ? "Unmute" : "Mute"}
+            title={muted || volume === 0 ? "Unmute" : "Mute"}
+            className="flex h-7 w-7 items-center justify-center rounded-full text-reel-muted transition hover:text-reel-amber"
+          >
+            {muted || volume === 0 ? "🔇" : volume < 0.5 ? "🔉" : "🔊"}
+          </button>
+          <input
+            type="range"
+            aria-label="Volume"
+            className="volumebar hidden w-16 sm:block"
+            min={0}
+            max={1}
+            step={0.01}
+            value={muted ? 0 : volume}
+            onChange={(e) => handleVolumeChange(Number(e.target.value))}
+          />
+          {/* Narrow screens: same slider, but tucked into a popover behind
+              the speaker icon instead of eating control-bar width. */}
+          {volumeMenuOpen && (
+            <div className="absolute bottom-full left-0 z-20 mb-2 rounded-lg border border-reel-border bg-reel-surface p-3 shadow-xl sm:hidden">
+              <input
+                type="range"
+                aria-label="Volume"
+                className="volumebar w-24"
+                min={0}
+                max={1}
+                step={0.01}
+                value={muted ? 0 : volume}
+                onChange={(e) => handleVolumeChange(Number(e.target.value))}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Playback speed */}
+        <div className="relative">
+          <button
+            onClick={() => {
+              setSpeedMenuOpen((v) => !v);
+              setAudioMenuOpen(false);
+              setSubsMenuOpen(false);
+            }}
+            aria-label="Playback speed"
+            aria-expanded={speedMenuOpen}
+            title="Playback speed"
+            className={`flex h-7 items-center justify-center rounded-full border px-2 text-[11px] font-medium transition sm:text-xs ${
+              speedMenuOpen || playbackSpeed !== 1
+                ? "border-reel-amber text-reel-amber"
+                : "border-reel-border text-reel-muted hover:border-reel-amber hover:text-reel-amber"
+            }`}
+          >
+            {playbackSpeed}x
+          </button>
+          {speedMenuOpen && (
+            <div className="absolute bottom-full right-0 z-20 mb-2 w-24 overflow-hidden rounded-lg border border-reel-border bg-reel-surface shadow-xl">
+              <p className="border-b border-reel-border px-3 py-1.5 text-[10px] uppercase tracking-wide text-reel-muted">
+                Speed
+              </p>
+              {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((s) => (
+                <button
+                  key={s}
+                  onClick={() => handleSelectSpeed(s)}
+                  className={`block w-full px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
+                    playbackSpeed === s ? "text-reel-amber" : "text-reel-text"
+                  }`}
+                >
+                  {s}x{s === 1 ? " (normal)" : ""}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {audioTracks.length > 1 && (
             <div className="relative">
               <button
                 onClick={() => {
@@ -1050,8 +1205,7 @@ useEffect(() => {
               )}
             </div>
           )}
-        </div>
-      )}
+      </div>
 
       {!isController && (
         <span className="shrink-0 rounded-full border border-reel-border bg-black/30 px-2.5 py-1 text-[10px] text-reel-muted backdrop-blur-sm sm:px-3 sm:py-1.5 sm:text-xs">
