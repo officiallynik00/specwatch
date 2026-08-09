@@ -1316,8 +1316,10 @@ useEffect(() => {
             both the control bar (bottom-0) and the chat input pill
             (also bottom-anchored) whenever either is visible. Anchoring
             to the vertical center of the right edge stays clear of both
-            in portrait AND landscape, and doesn't need to track the
-            control bar's show/hide state. */}
+            in portrait AND landscape. It does fade with the control bar
+            (fsControlsVisible below) for a consistent show/hide feel,
+            even though its position doesn't depend on the control bar's
+            height the way a bottom-anchored bar would. */}
         {isFullscreen && (
           <div className="pointer-events-none absolute inset-0 z-10">
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-full overflow-hidden">
@@ -1338,7 +1340,9 @@ useEffect(() => {
               ))}
             </div>
             <div
-              className="pointer-events-auto absolute right-2 top-1/2 flex -translate-y-1/2 flex-col items-center gap-2.5 rounded-full bg-black/30 px-1.5 py-2.5 backdrop-blur-sm sm:right-3 sm:gap-3 sm:px-2 sm:py-3"
+              className={`pointer-events-auto absolute right-2 top-1/2 flex -translate-y-1/2 flex-col items-center gap-2.5 rounded-full bg-black/30 px-1.5 py-2.5 backdrop-blur-sm transition-opacity duration-500 sm:right-3 sm:gap-3 sm:px-2 sm:py-3 ${
+                fsControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+              }`}
               style={{ marginRight: "env(safe-area-inset-right)" }}
             >
               {["❤️", "😂", "😮", "🔥", "👏", "😢"].map((emoji) => (
@@ -1358,10 +1362,13 @@ useEffect(() => {
         {/* Mic (push-to-talk) — small transparent icon, opposite corner
             from the chat toggle below, reachable in both fullscreen
             orientations since it's corner-anchored to this element, which
-            fills the screen in both portrait and landscape. */}
+            fills the screen in both portrait and landscape. Fades with
+            the control bar for a consistent show/hide feel. */}
         {isFullscreen && ptt && (
           <div
-            className="absolute left-2 top-2 flex gap-2 sm:left-3 sm:top-3"
+            className={`absolute left-2 top-2 flex gap-2 transition-opacity duration-500 sm:left-3 sm:top-3 ${
+              fsControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+            }`}
             style={{ marginLeft: "env(safe-area-inset-left)", marginTop: "env(safe-area-inset-top)" }}
           >
             <button
@@ -1403,11 +1410,16 @@ useEffect(() => {
           </div>
         )}
 
-        {/* Fullscreen / PiP / chat-toggle controls float over the video
-            itself so they're reachable even while the bottom control bar
-            is off-screen in fullscreen mode. */}
+        {/* Fullscreen / PiP / chat-toggle controls. Now fades with the
+            bottom control bar (fsControlsVisible) in fullscreen for a
+            consistent show/hide feel — tapping the screen brings both
+            back together, rather than these staying permanently visible
+            while everything else fades. Always visible in windowed mode
+            (fsControlsVisible is forced true on fullscreen exit). */}
         <div
-          className="absolute right-2 top-2 flex gap-2 sm:right-3 sm:top-3"
+          className={`absolute right-2 top-2 flex gap-2 transition-opacity duration-500 sm:right-3 sm:top-3 ${
+            fsControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+          }`}
           style={
             isFullscreen
               ? { marginRight: "env(safe-area-inset-right)", marginTop: "env(safe-area-inset-top)" }

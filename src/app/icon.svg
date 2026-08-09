@@ -1,0 +1,31 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="38%" r="60%">
+      <stop offset="0%" stop-color="#E8A548" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#E8A548" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="screen" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#E8A548" />
+      <stop offset="100%" stop-color="#B9803A" />
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="64" height="64" rx="14" fill="#0A0B10" />
+
+  <!-- ambient glow from the screen -->
+  <circle cx="32" cy="24" r="26" fill="url(#glow)" />
+
+  <!-- the "movie" screen, playing -->
+  <rect x="16" y="10" width="32" height="20" rx="3" fill="none" stroke="url(#screen)" stroke-width="2.4" />
+  <path d="M29 16.5 L37 20.5 L29 24.5 Z" fill="#E8A548" />
+
+  <!-- two heads, close together, silhouetted against the screen glow -->
+  <circle cx="24" cy="46" r="6.4" fill="#E8A548" />
+  <circle cx="40" cy="46" r="6.4" fill="#E8A548" />
+  <path d="M13 60 C13 51 18 47 24 47 C30 47 35 51 35 60 Z" fill="#E8A548" />
+  <path d="M29 60 C29 51 34 47 40 47 C46 47 51 51 51 60 Z" fill="#E8A548" />
+
+  <!-- black gap between the two shoulders so they read as two people, not one blob -->
+  <path d="M31 60 C31 53 30 49.5 32 47.5 C34 49.5 33 53 33 60 Z" fill="#0A0B10" />
+</svg>
