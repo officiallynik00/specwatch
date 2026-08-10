@@ -151,50 +151,20 @@ export default function VideoPlayer({
   const DUCK_RATIO = 0.22;
   const DUCK_MS = 220;
   const duckRafRef = useRef<number | null>(null);
-  // Guards the fullscreen mic button against a duplicate onStop firing
-  // (pointerup + pointerleave both landing) — same pattern PushToTalkButton
-  // uses for its windowed-mode button.
-  const micHeldRef = useRef(false);
-  const handleMicDown = useCallback(
-    (e: React.PointerEvent) => {
-      if (!ptt || ptt.status !== "connected" || micHeldRef.current) return;
-      e.preventDefault();
-      micHeldRef.current = true;
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch {
-        // Best-effort — see PushToTalkButton for why this matters on touch.
-      }
-      ptt.onStart();
-    },
-    [ptt]
-  );
-  const handleMicUp = useCallback(
-    (e: React.PointerEvent) => {
-      if (!ptt || !micHeldRef.current) return;
-      e.preventDefault();
-      micHeldRef.current = false;
-      try {
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      } catch {
-        // Already released or never captured — fine either way.
-      }
-      ptt.onStop();
-    },
-    [ptt]
-  );
-  // The mic button only exists in the fullscreen subtree — if the person
-  // exits fullscreen mid-press, it unmounts without a pointerup ever
-  // firing, so onStop() would never run and the ref would stay stuck
-  // "held" (silently blocking the next press, and possibly leaving the
-  // mic open on the partner's end). Catch that transition explicitly.
-  useEffect(() => {
-    if (!isFullscreen && micHeldRef.current) {
-      micHeldRef.current = false;
-      ptt?.onStop();
+  // Tap-to-toggle mic, matching PushToTalkButton's windowed version.
+  // Both buttons share the same isTalking state from the hook, so if
+  // fullscreen exits while talking, the windowed button (always
+  // rendered separately, regardless of fullscreen) still reflects the
+  // correct state and can toggle it off — no separate cleanup needed
+  // here the way the old press-and-hold design required.
+  const handleMicToggle = useCallback(() => {
+    if (!ptt) return;
+    if (ptt.status === "failed") ptt.onRetry();
+    else if (ptt.status === "connected") {
+      if (ptt.isTalking) ptt.onStop();
+      else ptt.onStart();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFullscreen]);
+  }, [ptt]);
 
   // Duck the movie's volume while either person is on push-to-talk, so a
   // comment mid-scene doesn't mean shouting over the soundtrack. Ramps
@@ -1372,10 +1342,7 @@ useEffect(() => {
             style={{ marginLeft: "env(safe-area-inset-left)", marginTop: "env(safe-area-inset-top)" }}
           >
             <button
-              onPointerDown={ptt.status === "failed" ? undefined : handleMicDown}
-              onPointerUp={ptt.status === "failed" ? undefined : handleMicUp}
-              onPointerCancel={ptt.status === "failed" ? undefined : handleMicUp}
-              onClick={ptt.status === "failed" ? ptt.onRetry : undefined}
+              onClick={handleMicToggle}
               onContextMenu={(e) => e.preventDefault()}
               disabled={ptt.status !== "connected" && ptt.status !== "failed"}
               aria-pressed={ptt.isTalking}
@@ -1383,14 +1350,14 @@ useEffect(() => {
                 ptt.status === "failed"
                   ? "Retry voice connection"
                   : ptt.isTalking
-                    ? "Release to stop talking"
-                    : "Hold to talk"
+                    ? "Tap to stop talking"
+                    : "Tap to talk"
               }
               title={
                 ptt.status === "failed"
                   ? "Voice unavailable — tap to retry"
                   : (ptt.error ??
-                    (ptt.status !== "connected" ? "Voice unavailable" : ptt.isTalking ? "Talking…" : "Hold to talk"))
+                    (ptt.status !== "connected" ? "Voice unavailable" : ptt.isTalking ? "Talking…" : "Tap to talk"))
               }
               className={`flex h-9 w-9 select-none items-center justify-center rounded-full backdrop-blur transition sm:h-8 sm:w-8 ${
                 ptt.status === "failed"
@@ -1403,7 +1370,6 @@ useEffect(() => {
                         ? "bg-black/30 text-reel-amber"
                         : "bg-black/30 text-reel-text hover:bg-black/50"
               }`}
-              style={{ touchAction: "none" }}
             >
               <span className="text-sm">{ptt.status === "failed" ? "↻" : ptt.isTalking ? "🔴" : "🎙️"}</span>
             </button>
