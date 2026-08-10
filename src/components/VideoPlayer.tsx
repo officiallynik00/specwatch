@@ -443,6 +443,10 @@ useEffect(() => {
     const video = videoRef.current as MediaElementWithAudioTracks | null;
     const list = video?.audioTracks;
     if (!video || !list) {
+      // No `audioTracks` property at all on this browser (Firefox is the
+      // common case) — temporary diagnostic so we can tell that apart
+      // from "the API exists but found nothing".
+      console.info("[audio-tracks] HTMLMediaElement.audioTracks unsupported in this browser");
       setAudioTracks([]);
       return;
     }
@@ -454,6 +458,13 @@ useEffect(() => {
         tracks.push(t);
         if (t.enabled) enabledId = t.id;
       }
+      // Temporary diagnostic — remove once we've confirmed what's being
+      // detected. Logs every time this fires (initial check, addtrack
+      // events, and the fallback polls below).
+      console.info(
+        `[audio-tracks] detected ${tracks.length}:`,
+        tracks.map((t) => ({ id: t.id, label: t.label, language: t.language, enabled: t.enabled }))
+      );
       setAudioTracks(tracks);
       setSelectedAudioId(enabledId);
     };
