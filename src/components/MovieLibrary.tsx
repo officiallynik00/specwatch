@@ -8,9 +8,11 @@ interface MovieLibraryProps {
   loading: boolean;
   uploading: boolean;
   progress: number;
+  resuming: boolean;
   error: string | null;
   currentMoviePath: string | null;
   onAdd: (file: File) => void;
+  onCancelUpload: () => void;
   onRemove: (movie: Movie) => void;
   onPlay: (movie: Movie) => void;
   onAddSubtitle: (movie: Movie, file: File) => void;
@@ -33,9 +35,11 @@ export default function MovieLibrary({
   loading,
   uploading,
   progress,
+  resuming,
   error,
   currentMoviePath,
   onAdd,
+  onCancelUpload,
   onRemove,
   onPlay,
   onAddSubtitle,
@@ -61,7 +65,7 @@ export default function MovieLibrary({
       <div className="mb-3 flex items-center justify-between">
         <p className="font-display text-lg italic text-reel-text">Library</p>
         <label className="cursor-pointer rounded-full border border-reel-border px-3 py-1.5 text-xs text-reel-muted transition hover:border-reel-amber hover:text-reel-amber">
-          {uploading ? `Uploading… ${progress}%` : "+ Add movie"}
+          {uploading ? `${resuming ? "Resuming" : "Uploading"}… ${progress}%` : "+ Add movie"}
           <input
             type="file"
             accept="video/mp4,video/*"
@@ -77,11 +81,19 @@ export default function MovieLibrary({
       </div>
 
       {uploading && (
-        <div className="mb-4 h-1.5 w-full overflow-hidden rounded-full bg-reel-border">
-          <div
-            className="h-full rounded-full bg-reel-amber transition-[width] duration-200"
-            style={{ width: `${progress}%` }}
-          />
+        <div className="mb-4 flex items-center gap-2">
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-reel-border">
+            <div
+              className="h-full rounded-full bg-reel-amber transition-[width] duration-200"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+          <button
+            onClick={onCancelUpload}
+            className="shrink-0 text-[11px] text-reel-muted underline decoration-dotted hover:text-reel-rose"
+          >
+            Cancel
+          </button>
         </div>
       )}
 

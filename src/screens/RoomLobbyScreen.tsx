@@ -238,9 +238,11 @@ export default function RoomLobbyScreen() {
             loading={library.loading}
             uploading={library.uploading}
             progress={library.progress}
+            resuming={library.resuming}
             error={library.error}
             currentMoviePath={room.movie_path}
             onAdd={library.addMovie}
+            onCancelUpload={library.cancelUpload}
             onRemove={library.removeMovie}
             onPlay={playMovie}
             onAddSubtitle={library.addSubtitle}

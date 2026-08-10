@@ -1,33 +1,123 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import type { Movie, Subtitle } from "@/lib/types";
 
 const MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5GB — well under B2's 10GB free-tier storage cap
+// If no new progress event arrives within this window, treat the current
+// request as stalled rather than waiting forever. For movie uploads this
+// only costs re-doing one PART_SIZE chunk, not the whole file — see the
+// multipart section below.
+const STALL_TIMEOUT_MS = 25_000;
+// Chunk size for resumable movie uploads. Must be >=5MB per S3/B2's
+// multipart spec for every part except the last. 10MB keeps a stall's
+// cost small while keeping the part count (and therefore request count)
+// reasonable even at the 5GB cap (~500 parts).
+const PART_SIZE = 10 * 1024 * 1024;
+// Single slot is enough — the UI only allows one upload in flight at a
+// time (the file input is disabled while uploading is true), so there's
+// never more than one real in-progress session to remember.
+const SESSION_KEY = "specwatch:movie-upload-session";
+
+interface UploadSession {
+  fingerprint: string; // name::size::lastModified — "is this the same file" check
+  movieId: string;
+  path: string;
+  uploadId: string;
+  roomCode: string;
+  totalParts: number;
+}
+
+function fileFingerprint(file: File): string {
+  return `${file.name}::${file.size}::${file.lastModified}`;
+}
+
+function loadSession(): UploadSession | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    return raw ? (JSON.parse(raw) as UploadSession) : null;
+  } catch {
+    return null;
+  }
+}
+function saveSession(session: UploadSession) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  } catch {
+    // Storage full/unavailable (private browsing, quota, etc.) — the
+    // current upload still proceeds normally, it just won't be
+    // resumable later. Not fatal.
+  }
+}
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    // Nothing to do if this fails — worst case a stale session lingers
+    // and gets discarded next time its fingerprint doesn't match.
+  }
+}
 
 /**
- * Uploads to B2 via a presigned PUT URL obtained from our own /api/r2-upload-url
- * route. We use XMLHttpRequest instead of fetch purely to get real
- * `xhr.upload.onprogress` events for a percentage bar.
+ * Uploads a single blob (a whole file, or one part of a multipart movie
+ * upload) via XHR, purely for real `xhr.upload.onprogress` events and a
+ * stall watchdog — `fetch` doesn't expose upload progress at all, and
+ * neither fetch nor a bare XHR times out on a connection that goes
+ * silent without closing (mobile network switches, a backgrounded tab).
+ * Returns the response's ETag header when present, since B2's multipart
+ * UploadPart response needs to be threaded back into CompleteMultipart.
  */
-function uploadWithProgress(
+function uploadBlobWithProgress(
   url: string,
-  file: File,
-  onProgress: (pct: number) => void
-): Promise<{ error?: string }> {
+  blob: Blob,
+  contentType: string | undefined,
+  onProgressDelta: (deltaBytes: number) => void,
+  xhrRef: { current: XMLHttpRequest | null }
+): Promise<{ etag?: string; error?: string; cancelled?: boolean }> {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
+    xhrRef.current = xhr;
     xhr.open("PUT", url, true);
-    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    if (contentType) xhr.setRequestHeader("Content-Type", contentType);
+
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+    let lastLoaded = 0;
+
+    const finish = (result: { etag?: string; error?: string; cancelled?: boolean }) => {
+      if (settled) return;
+      settled = true;
+      if (stallTimer) clearTimeout(stallTimer);
+      xhrRef.current = null;
+      resolve(result);
+    };
+    const resetStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        xhr.abort();
+        finish({ error: "Stalled — no progress for a while. Check your connection." });
+      }, STALL_TIMEOUT_MS);
+    };
+    resetStallTimer();
 
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      resetStallTimer();
+      const delta = e.loaded - lastLoaded;
+      lastLoaded = e.loaded;
+      if (delta > 0) onProgressDelta(delta);
     };
     xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve({});
-      else resolve({ error: `Upload failed (status ${xhr.status})` });
+      if (xhr.status >= 200 && xhr.status < 300) {
+        // ETag is only meaningful for multipart part uploads — a plain
+        // single-PUT caller (subtitles) just ignores it.
+        const etag = xhr.getResponseHeader("ETag") || xhr.getResponseHeader("etag") || undefined;
+        finish({ etag });
+      } else {
+        finish({ error: `Upload failed (status ${xhr.status})` });
+      }
     };
-    xhr.onerror = () => resolve({ error: "Network error during upload." });
-    xhr.send(file);
+    xhr.onerror = () => finish({ error: "Network error during upload." });
+    xhr.onabort = () => finish({ cancelled: true });
+    xhr.send(blob);
   });
 }
 
@@ -41,16 +131,25 @@ interface UseMovieLibraryOptions {
  * by anyone — not scoped to whichever room happens to be open right now.
  * A room's *currently playing* movie (room.movie_path on the `rooms` row —
  * see useRoomSync) is a separate, per-room pointer into this shared shelf.
- * File bytes live in B2 (see /api/r2-upload-url, /api/r2-play-url,
+ * File bytes live in B2 (see /api/r2-multipart-*, /api/r2-play-url,
  * /api/r2-delete); metadata lives in the `movies` table with realtime
  * INSERT/DELETE so every room sees the same shelf update instantly.
+ *
+ * Movie uploads are resumable: the file is sent in PART_SIZE chunks via
+ * B2's multipart upload API. Re-selecting the same file (same name, size,
+ * and last-modified time) after a stall, a tab close, or hitting Cancel
+ * picks up from whichever parts B2 confirms it already has — not from
+ * whatever a stale localStorage record claims, which is the actual
+ * source of truth check in /api/r2-multipart-list-parts.
  */
 export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
   const [movies, setMovies] = useState<Movie[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeXhrRef = useRef<XMLHttpRequest | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -111,41 +210,170 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
 
       setUploading(true);
       setProgress(0);
+      setResuming(false);
 
-      // Unique path per movie (not a fixed "movie.ext") since the
-      // library can hold more than one file, from any room.
-      const movieId = crypto.randomUUID();
+      const fingerprint = fileFingerprint(file);
+      const contentType = file.type || "application/octet-stream";
+      let session = loadSession();
+      // A stale session for a *different* file than the one just picked
+      // is simply not reachable through this UI anymore — drop it
+      // locally rather than trying to resume the wrong upload. (Its
+      // held parts on B2 are cheap and not visible to anyone; not worth
+      // an extra network round trip to abort them here.)
+      if (session && session.fingerprint !== fingerprint) session = null;
+
+      let alreadyUploaded: { PartNumber: number; ETag: string; Size: number }[] = [];
+
+      if (session) {
+        try {
+          const res = await fetch("/api/r2-multipart-list-parts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: session.path, uploadId: session.uploadId }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            alreadyUploaded = data.parts ?? [];
+          } else {
+            // uploadId is gone (expired, already completed elsewhere,
+            // or never existed) — can't resume it, fall through to a
+            // fresh session below.
+            session = null;
+          }
+        } catch {
+          session = null;
+        }
+      }
+
+      const totalParts = Math.max(1, Math.ceil(file.size / PART_SIZE));
+      const movieId = session?.movieId ?? crypto.randomUUID();
       const ext = file.name.split(".").pop() || "mp4";
-      const path = `${roomCode}/${movieId}.${ext}`;
+      const path = session?.path ?? `${roomCode}/${movieId}.${ext}`;
 
-      // Ask our server for a presigned PUT URL, then upload straight to
-      // B2 with it — the file never passes through our own server.
-      let signedUrl: string;
-      try {
-        const res = await fetch("/api/r2-upload-url", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path, contentType: file.type || "application/octet-stream" }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.url) {
-          setError(`Couldn't start the upload: ${data.error || "unknown error"}`);
+      let uploadId = session?.uploadId ?? null;
+      if (!uploadId) {
+        try {
+          const res = await fetch("/api/r2-multipart-init", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path, contentType }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.uploadId) {
+            setError(`Couldn't start the upload: ${data.error || "unknown error"}`);
+            setUploading(false);
+            return;
+          }
+          uploadId = data.uploadId;
+        } catch {
+          setError("Couldn't reach the server to start the upload.");
           setUploading(false);
           return;
         }
-        signedUrl = data.url;
-      } catch {
-        setError("Couldn't reach the server to start the upload.");
+      }
+
+      if (!uploadId) {
+        // Unreachable in practice — the block above always either sets
+        // uploadId or returns early — but keeps TypeScript's narrowing
+        // happy without an assertion.
+        setError("Couldn't determine an upload session. Try again.");
         setUploading(false);
         return;
       }
 
-      const { error: uploadError } = await uploadWithProgress(signedUrl, file, setProgress);
-      if (uploadError) {
-        setError(`Upload failed: ${uploadError}`);
+      saveSession({ fingerprint, movieId, path, uploadId, roomCode, totalParts });
+
+      const finishedParts = new Map<number, { PartNumber: number; ETag: string }>();
+      let doneBytes = 0;
+      for (const p of alreadyUploaded) {
+        finishedParts.set(p.PartNumber, { PartNumber: p.PartNumber, ETag: p.ETag });
+        doneBytes += p.Size;
+      }
+      if (finishedParts.size > 0) {
+        setResuming(true);
+        setProgress(Math.min(99, Math.round((doneBytes / file.size) * 100)));
+      }
+
+      for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+        if (finishedParts.has(partNumber)) continue;
+
+        const start = (partNumber - 1) * PART_SIZE;
+        const end = Math.min(start + PART_SIZE, file.size);
+        const blob = file.slice(start, end);
+
+        let partUrl: string;
+        try {
+          const res = await fetch("/api/r2-multipart-part-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path, uploadId, partNumber }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.url) {
+            setError(
+              `Couldn't get an upload slot for part ${partNumber}/${totalParts}: ${data.error || "unknown error"}. ` +
+                "Re-select the same file to resume from here."
+            );
+            setUploading(false);
+            return;
+          }
+          partUrl = data.url;
+        } catch {
+          setError("Couldn't reach the server. Re-select the same file to resume from here.");
+          setUploading(false);
+          return;
+        }
+
+        const result = await uploadBlobWithProgress(
+          partUrl,
+          blob,
+          undefined,
+          (deltaBytes) => {
+            doneBytes += deltaBytes;
+            setProgress(Math.min(99, Math.round((doneBytes / file.size) * 100)));
+          },
+          activeXhrRef
+        );
+
+        if (result.cancelled) {
+          // Deliberate pause, not a failure — the session stays saved so
+          // re-selecting the same file continues from here.
+          setError("Upload paused. Re-select the same file to continue.");
+          setUploading(false);
+          return;
+        }
+        if (result.error || !result.etag) {
+          setError(
+            `Upload failed on part ${partNumber}/${totalParts}: ${result.error ?? "no ETag returned"}. ` +
+              "Re-select the same file to resume from here."
+          );
+          setUploading(false);
+          return;
+        }
+        finishedParts.set(partNumber, { PartNumber: partNumber, ETag: result.etag });
+      }
+
+      try {
+        const res = await fetch("/api/r2-multipart-complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path, uploadId, parts: Array.from(finishedParts.values()) }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setError(`Couldn't finalize the upload: ${data.error || "unknown error"}. Re-select the same file to retry.`);
+          setUploading(false);
+          return;
+        }
+      } catch {
+        setError("Couldn't reach the server to finalize the upload. Re-select the same file to retry.");
         setUploading(false);
         return;
       }
+
+      clearSession();
+      setProgress(100);
+      setResuming(false);
 
       const title = file.name.replace(/\.[^/.]+$/, "");
       // room_id is kept only as a breadcrumb of which room the upload
@@ -178,6 +406,25 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
     },
     [roomId, roomCode]
   );
+
+  const cancelUpload = useCallback(() => {
+    activeXhrRef.current?.abort();
+    // xhr.onabort (in uploadBlobWithProgress) resolves with `cancelled`,
+    // which addMovie's loop turns into a "paused, re-select to resume"
+    // message — the multipart session is deliberately NOT cleared here,
+    // that's the whole point of "cancel" meaning "pause" for a movie
+    // upload rather than "discard".
+  }, []);
+
+  // If the person leaves the room (or the room screen unmounts for any
+  // other reason) mid-upload, don't leave the XHR running unattended in
+  // the background — abort it along with the component. The session
+  // stays saved, same as a manual cancel.
+  useEffect(() => {
+    return () => {
+      activeXhrRef.current?.abort();
+    };
+  }, []);
 
   const removeMovie = useCallback(async (movie: Movie) => {
     setError(null);
@@ -242,9 +489,11 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       return;
     }
 
-    const { error: uploadError } = await uploadWithProgress(signedUrl, file, () => {});
-    if (uploadError) {
-      setError(`Subtitle upload failed: ${uploadError}`);
+    // Subtitle files are tiny (KB, not GB) — no need for the multipart/
+    // resumable machinery movies use above, a plain single PUT is fine.
+    const result = await uploadBlobWithProgress(signedUrl, file, "text/plain", () => {}, { current: null });
+    if (result.error || result.cancelled) {
+      setError(`Subtitle upload failed: ${result.error ?? "cancelled"}`);
       return;
     }
 
@@ -300,8 +549,10 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
     loading,
     uploading,
     progress,
+    resuming,
     error,
     addMovie,
+    cancelUpload,
     removeMovie,
     addSubtitle,
     removeSubtitle,
