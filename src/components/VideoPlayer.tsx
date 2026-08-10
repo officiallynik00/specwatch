@@ -29,6 +29,38 @@ interface MediaElementWithAudioTracks extends HTMLVideoElement {
   audioTracks?: AudioTrackListLike;
 }
 
+// Most encoders leave the track's `label` empty and only set a raw
+// BCP-47/ISO-639 code ("hin", "en", "und" for "undefined"), so the
+// dropdown would otherwise show cryptic codes instead of names. This
+// resolves a code to a readable language name using the browser's own
+// locale data — no hardcoded table to maintain, and it's already
+// correct in whatever language the browser itself is set to.
+function languageDisplayName(code: string): string | null {
+  if (!code || code.toLowerCase() === "und") return null;
+  try {
+    const displayNames = new Intl.DisplayNames(["en"], { type: "language" });
+    const name = displayNames.of(code);
+    // Intl.DisplayNames falls back to echoing the input code unchanged
+    // for a tag it can't resolve, rather than throwing — catch that so
+    // we fall through to the "Track N" default instead of showing the
+    // same unhelpful code back to the person.
+    return name && name.toLowerCase() !== code.toLowerCase() ? name : null;
+  } catch {
+    // Malformed/unrecognized subtag (RangeError) — same fallback.
+    return null;
+  }
+}
+
+function audioTrackDisplayLabel(track: AudioTrackLike, index: number): string {
+  const langName = languageDisplayName(track.language);
+  if (track.label && langName && track.label.toLowerCase() !== langName.toLowerCase()) {
+    // Both present and genuinely different — e.g. label "Director's Commentary"
+    // with language "en" — show both since neither alone tells the full story.
+    return `${track.label} · ${langName}`;
+  }
+  return track.label || langName || `Track ${index + 1}`;
+}
+
 /** Selected subtitle: "off", `own:<subtitleId>` (an uploaded file), or
  *  `embedded:<index>` (an in-band track already in the source file). */
 type SubtitleSelection = "off" | `own:${string}` | `embedded:${number}`;
@@ -429,10 +461,19 @@ useEffect(() => {
     list.addEventListener("addtrack", update);
     list.addEventListener("removetrack", update);
     list.addEventListener("change", update);
+
+    // Belt-and-suspenders: some browsers discover in-band audio tracks
+    // for cross-origin streamed video (B2, in our case) without firing
+    // "addtrack" reliably, even though the tracks genuinely exist and
+    // loadedmetadata fires fine. A few cheap re-checks shortly after
+    // load catches that case without polling forever.
+    const pollTimers = [500, 1500, 3000, 6000].map((ms) => setTimeout(update, ms));
+
     return () => {
       list.removeEventListener("addtrack", update);
       list.removeEventListener("removetrack", update);
       list.removeEventListener("change", update);
+      pollTimers.forEach(clearTimeout);
     };
   }, [movieUrl]);
 
@@ -1087,19 +1128,20 @@ useEffect(() => {
                 🔊
               </button>
               {audioMenuOpen && (
-                <div className="absolute bottom-full right-0 z-20 mb-2 w-44 overflow-hidden rounded-lg border border-reel-border bg-reel-surface shadow-xl">
+                <div className="absolute bottom-full right-0 z-20 mb-2 w-48 overflow-hidden rounded-lg border border-reel-border bg-reel-surface shadow-xl">
                   <p className="border-b border-reel-border px-3 py-1.5 text-[10px] uppercase tracking-wide text-reel-muted">
-                    Audio
+                    Audio language
                   </p>
                   {audioTracks.map((t, i) => (
                     <button
                       key={t.id || i}
                       onClick={() => handleSelectAudioTrack(t.id)}
-                      className={`block w-full px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
+                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
                         selectedAudioId === t.id ? "text-reel-amber" : "text-reel-text"
                       }`}
                     >
-                      {t.label || t.language || `Track ${i + 1}`}
+                      <span className="truncate">{audioTrackDisplayLabel(t, i)}</span>
+                      {selectedAudioId === t.id && <span className="ml-2 shrink-0">✓</span>}
                     </button>
                   ))}
                 </div>
