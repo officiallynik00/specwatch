@@ -248,6 +248,7 @@ export default function PlayerScreen() {
         onStart={ptt.startTalking}
         onStop={ptt.stopTalking}
         onRetry={ptt.retry}
+        chatOpen={chatOpen}
       />
     </main>
   );

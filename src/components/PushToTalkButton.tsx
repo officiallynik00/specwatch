@@ -12,6 +12,12 @@ interface PushToTalkButtonProps {
   onStart: () => void;
   onStop: () => void;
   onRetry: () => void;
+  // The windowed chat drawer becomes a full-width bottom sheet
+  // (h-[70dvh]) on mobile, but only below Tailwind's sm breakpoint —
+  // at sm and up it's a fixed-size corner panel that doesn't reach
+  // this button's corner at all. So this only needs to reposition the
+  // mic on the narrow/mobile case; see the className below.
+  chatOpen?: boolean;
 }
 
 const STATUS_COPY: Record<PttStatus, string> = {
@@ -31,6 +37,7 @@ export default function PushToTalkButton({
   onStart,
   onStop,
   onRetry,
+  chatOpen,
 }: PushToTalkButtonProps) {
   // Tap-to-toggle: one tap turns the mic on and leaves it on, the next
   // tap turns it off — as opposed to the earlier press-and-hold design.
@@ -50,7 +57,14 @@ export default function PushToTalkButton({
   const label = error ?? (partnerTalking ? `${partnerName ?? "Partner"} is talking…` : STATUS_COPY[status]);
 
   return (
-    <div className="fixed bottom-5 left-5 z-30 flex flex-col items-start gap-2">
+    <div
+      className={`fixed left-5 z-30 flex flex-col items-start gap-2 transition-[bottom] duration-300 ${
+        // Lifted above the open chat drawer on mobile only — the drawer
+        // isn't full-width at sm+ so bottom-5 is always correct there,
+        // regardless of chatOpen.
+        chatOpen ? "bottom-[calc(70dvh+1rem)] sm:bottom-5" : "bottom-5"
+      }`}
+    >
       {(isTalking || partnerTalking || error || status === "failed") && (
         <span
           className={`rounded-full border px-3 py-1 text-xs ${
