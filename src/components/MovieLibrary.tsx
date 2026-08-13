@@ -9,6 +9,7 @@ interface MovieLibraryProps {
   uploading: boolean;
   progress: number;
   resuming: boolean;
+  etaSeconds: number | null;
   error: string | null;
   currentMoviePath: string | null;
   onAdd: (file: File) => void;
@@ -30,12 +31,26 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+// null while we don't have a reliable estimate yet (upload just started,
+// or speed is effectively zero) — caller shows nothing in that case
+// rather than a misleading "0s left" or "Infinity".
+function formatEta(seconds: number | null): string | null {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+  if (seconds < 45) return "less than a minute left";
+  const totalMinutes = Math.round(seconds / 60);
+  if (totalMinutes < 60) return `~${totalMinutes} min left`;
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `~${h}h ${m}m left`;
+}
+
 export default function MovieLibrary({
   movies,
   loading,
   uploading,
   progress,
   resuming,
+  etaSeconds,
   error,
   currentMoviePath,
   onAdd,
@@ -88,6 +103,9 @@ export default function MovieLibrary({
               style={{ width: `${progress}%` }}
             />
           </div>
+          {formatEta(etaSeconds) && (
+            <span className="shrink-0 text-[11px] text-reel-muted">{formatEta(etaSeconds)}</span>
+          )}
           <button
             onClick={onCancelUpload}
             className="shrink-0 text-[11px] text-reel-muted underline decoration-dotted hover:text-reel-rose"
