@@ -17,6 +17,10 @@ const PART_SIZE = 10 * 1024 * 1024;
 // time (the file input is disabled while uploading is true), so there's
 // never more than one real in-progress session to remember.
 const SESSION_KEY = "specwatch:movie-upload-session";
+// Smoothing factor for the ETA speed estimate — higher = more reactive
+// to recent chunks, lower = steadier but slower to react to a real
+// speed change (e.g. wifi -> cellular handoff mid-upload).
+const ETA_EMA_ALPHA = 0.25;
 
 interface UploadSession {
   fingerprint: string; // name::size::lastModified — "is this the same file" check
@@ -148,8 +152,11 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [resuming, setResuming] = useState(false);
+  const [etaSeconds, setEtaSeconds] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const activeXhrRef = useRef<XMLHttpRequest | null>(null);
+  const lastSampleTimeRef = useRef<number>(0);
+  const emaSpeedRef = useRef<number>(0); // smoothed bytes/sec
 
   useEffect(() => {
     let cancelled = false;
@@ -211,6 +218,9 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       setUploading(true);
       setProgress(0);
       setResuming(false);
+      setEtaSeconds(null);
+      lastSampleTimeRef.current = performance.now();
+      emaSpeedRef.current = 0;
 
       const fingerprint = fileFingerprint(file);
       const contentType = file.type || "application/octet-stream";
@@ -331,6 +341,19 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
           (deltaBytes) => {
             doneBytes += deltaBytes;
             setProgress(Math.min(99, Math.round((doneBytes / file.size) * 100)));
+
+            const now = performance.now();
+            const dt = (now - lastSampleTimeRef.current) / 1000;
+            lastSampleTimeRef.current = now;
+            if (dt > 0 && deltaBytes > 0) {
+              const instantSpeed = deltaBytes / dt;
+              emaSpeedRef.current =
+                emaSpeedRef.current === 0
+                  ? instantSpeed
+                  : emaSpeedRef.current * (1 - ETA_EMA_ALPHA) + instantSpeed * ETA_EMA_ALPHA;
+              const remaining = file.size - doneBytes;
+              setEtaSeconds(emaSpeedRef.current > 0 ? remaining / emaSpeedRef.current : null);
+            }
           },
           activeXhrRef
         );
@@ -374,6 +397,7 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       clearSession();
       setProgress(100);
       setResuming(false);
+      setEtaSeconds(null);
 
       const title = file.name.replace(/\.[^/.]+$/, "");
       // room_id is kept only as a breadcrumb of which room the upload
@@ -550,6 +574,7 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
     uploading,
     progress,
     resuming,
+    etaSeconds,
     error,
     addMovie,
     cancelUpload,
