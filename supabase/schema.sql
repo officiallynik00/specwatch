@@ -181,3 +181,13 @@ create index if not exists movies_uploaded_at_idx on movies (uploaded_at desc);
 -- presigned-URL B2 routes as the movie file itself (see
 -- /api/r2-upload-url, /api/r2-play-url) — only the DB row is different.
 alter table movies add column if not exists subtitles jsonb not null default '[]'::jsonb;
+
+-- ── extracted audio tracks ──
+-- Each entry: { id, storage_path, label, language }. When an uploaded
+-- movie file has more than one embedded audio stream (e.g. English +
+-- Hindi muxed into one file), every stream past the first is pulled out
+-- client-side (ffmpeg.wasm, at upload time — see useMovieLibrary.ts) into
+-- its own small standalone file and stored here, so it can be selected
+-- in the player without depending on the browser's native audioTracks
+-- API, which as of 2026 only Safari actually supports.
+alter table movies add column if not exists audio_tracks jsonb not null default '[]'::jsonb;

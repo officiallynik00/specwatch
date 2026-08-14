@@ -221,6 +221,8 @@ export default function PlayerScreen() {
               onStart: ptt.startTalking,
               onStop: ptt.stopTalking,
               onRetry: ptt.retry,
+              callVolume: ptt.callVolume,
+              onCallVolumeChange: ptt.setCallVolume,
             }}
           />
         )}
@@ -248,6 +250,8 @@ export default function PlayerScreen() {
         onStart={ptt.startTalking}
         onStop={ptt.stopTalking}
         onRetry={ptt.retry}
+        callVolume={ptt.callVolume}
+        onCallVolumeChange={ptt.setCallVolume}
         chatOpen={chatOpen}
       />
     </main>

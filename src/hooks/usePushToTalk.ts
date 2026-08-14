@@ -57,6 +57,24 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
   const [isTalking, setIsTalking] = useState(false);
   const [partnerTalking, setPartnerTalking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // How loud the *partner's voice* plays, independent of movie volume —
+  // persisted since it's a personal comfort preference, same spirit as
+  // remembering a chosen movie volume would be if that existed too.
+  const [callVolume, setCallVolumeState] = useState(() => {
+    if (typeof window === "undefined") return 1;
+    const saved = window.localStorage.getItem("specwatch:call-volume");
+    const parsed = saved ? Number(saved) : NaN;
+    return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : 1;
+  });
+  const setCallVolume = useCallback((v: number) => {
+    const clamped = Math.min(1, Math.max(0, v));
+    setCallVolumeState(clamped);
+    try {
+      window.localStorage.setItem("specwatch:call-volume", String(clamped));
+    } catch {
+      // Not fatal — the slider still works for this session either way.
+    }
+  }, []);
 
   const channelRef = useRef<RealtimeChannel | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -73,26 +91,30 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
   const supported =
     typeof window !== "undefined" && !!window.RTCPeerConnection && !!navigator.mediaDevices?.getUserMedia;
 
-  const attachRemoteStream = useCallback((stream: MediaStream) => {
-    if (!remoteAudioElRef.current) {
-      const el = document.createElement("audio");
-      el.autoplay = true;
-      // Not in the DOM lib's HTMLAudioElement type, but harmless/ignored
-      // on audio elements anyway — kept only for safety on browsers that
-      // treat this element as video-like internally.
-      el.setAttribute("playsinline", "true");
-      el.style.display = "none";
-      document.body.appendChild(el);
-      remoteAudioElRef.current = el;
-    }
-    remoteAudioElRef.current.srcObject = stream;
-    remoteAudioElRef.current.play().catch(() => {
-      // Autoplay can be blocked without a prior user gesture on the page.
-      // By the time a partner's track arrives, the person has already
-      // clicked "join room", so this is a rare edge case — surfacing an
-      // error here would just be noise.
-    });
-  }, []);
+  const attachRemoteStream = useCallback(
+    (stream: MediaStream) => {
+      if (!remoteAudioElRef.current) {
+        const el = document.createElement("audio");
+        el.autoplay = true;
+        // Not in the DOM lib's HTMLAudioElement type, but harmless/ignored
+        // on audio elements anyway — kept only for safety on browsers that
+        // treat this element as video-like internally.
+        el.setAttribute("playsinline", "true");
+        el.style.display = "none";
+        document.body.appendChild(el);
+        remoteAudioElRef.current = el;
+      }
+      remoteAudioElRef.current.volume = callVolume;
+      remoteAudioElRef.current.srcObject = stream;
+      remoteAudioElRef.current.play().catch(() => {
+        // Autoplay can be blocked without a prior user gesture on the page.
+        // By the time a partner's track arrives, the person has already
+        // clicked "join room", so this is a rare edge case — surfacing an
+        // error here would just be noise.
+      });
+    },
+    [callVolume]
+  );
 
   const detachRemoteStream = useCallback(() => {
     if (remoteAudioElRef.current) {
@@ -101,6 +123,14 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
       remoteAudioElRef.current = null;
     }
   }, []);
+
+  // Applies live if the slider moves mid-call — attachRemoteStream only
+  // sets .volume at the moment a track first arrives, so without this,
+  // adjusting the slider while already connected would silently do
+  // nothing until the next reconnect.
+  useEffect(() => {
+    if (remoteAudioElRef.current) remoteAudioElRef.current.volume = callVolume;
+  }, [callVolume]);
 
   const flushPendingCandidates = useCallback(async (pc: RTCPeerConnection) => {
     const queued = pendingCandidatesRef.current;
@@ -126,6 +156,17 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
       partnerTalkingTimeoutRef.current = null;
     }
     setPartnerTalking(false);
+    // The connection this was tied to is gone — a fresh one (if/when the
+    // partner reconnects) will need a brand-new sender with the track
+    // reattached via startTalking(). Leaving isTalking stuck true here
+    // would show the mic as still "active" after a disconnect, and a
+    // subsequent tap would try to *stop* a track that was never attached
+    // to the new connection in the first place, instead of starting
+    // cleanly. Also release the actual track, matching what stopTalking
+    // does — no reason for it to stay enabled on hardware pointed at a
+    // connection that no longer exists.
+    localStreamRef.current?.getAudioTracks().forEach((t) => (t.enabled = false));
+    setIsTalking(false);
   }, [detachRemoteStream]);
 
   const setupConnection = useCallback(() => {
@@ -158,7 +199,26 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "connected") setStatus("connected");
       else if (pc.connectionState === "failed" || pc.connectionState === "closed") setStatus("failed");
-      else if (pc.connectionState === "disconnected") setStatus("connecting");
+      else if (pc.connectionState === "disconnected") {
+        setStatus("connecting");
+        // "disconnected" can self-recover on its own within a few
+        // seconds (a brief WiFi blip), but often doesn't without an
+        // explicit nudge — left alone, the browser eventually times out
+        // to "failed" on its own clock (which can take 20-30+ seconds),
+        // requiring a manual retry tap for what might've been a
+        // recoverable hiccup. Only the host restarts ICE: per spec,
+        // restartIce() only meaningfully does something on the side
+        // that creates offers, which is only ever the host here — the
+        // non-host just reacts normally to whatever offer results.
+        if (isHost) {
+          try {
+            pc.restartIce();
+          } catch {
+            // Not fatal — worst case this behaves as it did before,
+            // waiting for the browser's own failure timeout.
+          }
+        }
+      }
     };
 
     // Only the fixed initiator (host) drives offers, so the two sides
@@ -247,6 +307,7 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
 
     const channel = supabase.channel(`ptt-signal:${roomCode}`);
     channelRef.current = channel;
+    let cancelled = false;
 
     channel.on("broadcast", { event: "offer" }, ({ payload }) => handleOffer(payload as SignalPayload));
     channel.on("broadcast", { event: "answer" }, ({ payload }) => handleAnswer(payload as SignalPayload));
@@ -268,9 +329,23 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
       }
     });
 
-    channel.subscribe();
+    // Without this, a signaling-channel failure (Realtime disabled,
+    // connection-limit hit, transient network issue at subscribe time)
+    // looks identical to a normal slow handshake — status just sits on
+    // whatever it already was, forever, since the RTCPeerConnection
+    // itself has no way to know the offer/answer it's waiting on was
+    // never actually deliverable. This gives that failure mode its own
+    // visible "failed" state instead of silently stalling.
+    channel.subscribe((subStatus) => {
+      if (cancelled) return;
+      if (subStatus === "CHANNEL_ERROR" || subStatus === "TIMED_OUT") {
+        setStatus("failed");
+        setError("Couldn't reach the voice signaling server. Try again.");
+      }
+    });
 
     return () => {
+      cancelled = true;
       supabase.removeChannel(channel);
       channelRef.current = null;
     };
@@ -305,7 +380,14 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
     setError(null);
     try {
       if (!localStreamRef.current) {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Explicit rather than relying on browser defaults — these are
+        // usually on by default anyway, but "usually" isn't "always"
+        // across every browser/device combination, and getting this
+        // wrong specifically hurts a voice-chat feature (echo, background
+        // hiss) more than it would most other getUserMedia uses.
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
         localStreamRef.current = stream;
       }
       const track = localStreamRef.current.getAudioTracks()[0];
@@ -361,5 +443,15 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
     setupConnection();
   }, [teardownConnection, setupConnection]);
 
-  return { status, isTalking, partnerTalking, error, startTalking, stopTalking, retry };
+  return {
+    status,
+    isTalking,
+    partnerTalking,
+    error,
+    startTalking,
+    stopTalking,
+    retry,
+    callVolume,
+    setCallVolume,
+  };
 }

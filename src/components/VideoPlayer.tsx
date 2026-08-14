@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase/client";
 import type { ConnectionStatus } from "@/hooks/useRoomSync";
-import type { ChatMessage, Room, SyncEvent, Subtitle } from "@/lib/types";
+import type { ChatMessage, Room, SyncEvent, Subtitle, ExtractedAudioTrack } from "@/lib/types";
+import { languageDisplayName } from "@/lib/language";
 import FullscreenChatOverlay from "@/components/FullscreenChatOverlay";
 import EmojiOverlay, { type FloatingBubble } from "@/components/EmojiOverlay";
 import type { PttStatus } from "@/hooks/usePushToTalk";
@@ -30,27 +31,9 @@ interface MediaElementWithAudioTracks extends HTMLVideoElement {
 }
 
 // Most encoders leave the track's `label` empty and only set a raw
-// BCP-47/ISO-639 code ("hin", "en", "und" for "undefined"), so the
-// dropdown would otherwise show cryptic codes instead of names. This
-// resolves a code to a readable language name using the browser's own
-// locale data — no hardcoded table to maintain, and it's already
-// correct in whatever language the browser itself is set to.
-function languageDisplayName(code: string): string | null {
-  if (!code || code.toLowerCase() === "und") return null;
-  try {
-    const displayNames = new Intl.DisplayNames(["en"], { type: "language" });
-    const name = displayNames.of(code);
-    // Intl.DisplayNames falls back to echoing the input code unchanged
-    // for a tag it can't resolve, rather than throwing — catch that so
-    // we fall through to the "Track N" default instead of showing the
-    // same unhelpful code back to the person.
-    return name && name.toLowerCase() !== code.toLowerCase() ? name : null;
-  } catch {
-    // Malformed/unrecognized subtag (RangeError) — same fallback.
-    return null;
-  }
-}
-
+// BCP-47/ISO-639 code ("hin", "en", "und" for "undefined") — see
+// languageDisplayName in lib/language.ts for how that gets resolved to
+// a readable name.
 function audioTrackDisplayLabel(track: AudioTrackLike, index: number): string {
   const langName = languageDisplayName(track.language);
   if (track.label && langName && track.label.toLowerCase() !== langName.toLowerCase()) {
@@ -114,6 +97,8 @@ interface VideoPlayerProps {
     onStart: () => void;
     onStop: () => void;
     onRetry: () => void;
+    callVolume: number;
+    onCallVolumeChange: (v: number) => void;
   };
 }
 
@@ -176,6 +161,7 @@ export default function VideoPlayer({
   const baseRateRef = useRef(1);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const [volumeMenuOpen, setVolumeMenuOpen] = useState(false);
+  const [callVolumeMenuOpen, setCallVolumeMenuOpen] = useState(false);
   // Volume ducking while either side is on push-to-talk. Ducks to a
   // fraction of whatever the person chose with the volume slider (not a
   // fixed absolute level), so it dips proportionally whether they're
@@ -210,9 +196,16 @@ export default function VideoPlayer({
     const target = ptt?.isTalking || ptt?.partnerTalking ? chosenVolume * DUCK_RATIO : chosenVolume;
     if (duckRafRef.current !== null) cancelAnimationFrame(duckRafRef.current);
 
+    // Apply to both the video and the alt-audio element (if one exists)
+    // rather than branching on which is currently the audible one —
+    // only one is ever actually unmuted at a time (see
+    // handleSelectAltAudioTrack), so keeping both numerically in sync
+    // means switching tracks mid-playback doesn't need to re-trigger
+    // this effect separately.
     const start = video.volume;
     if (Math.abs(start - target) < 0.001) {
       video.volume = target;
+      if (altAudioRef.current) altAudioRef.current.volume = target;
       return;
     }
     const startTime = performance.now();
@@ -223,7 +216,9 @@ export default function VideoPlayer({
       const t = Math.min(1, (now - startTime) / DUCK_MS);
       // Smoothstep easing — gentler at both ends than a linear ramp.
       const eased = t * t * (3 - 2 * t);
-      video2.volume = start + (target - start) * eased;
+      const v = start + (target - start) * eased;
+      video2.volume = v;
+      if (altAudioRef.current) altAudioRef.current.volume = v;
       if (t < 1) {
         duckRafRef.current = requestAnimationFrame(step);
       } else {
@@ -277,6 +272,17 @@ export default function VideoPlayer({
   // into the source file (embedded tracks show up in video.textTracks
   // automatically, with no <track> element of ours involved).
   const [subtitleMeta, setSubtitleMeta] = useState<Subtitle[]>([]);
+  // App-level alternate audio tracks — extracted client-side at upload
+  // time (see lib/audioExtract.ts) and stored in the movies row, as
+  // opposed to `audioTracks` below which is the browser's native
+  // in-video track list (Safari-only as of 2026 — see that state's own
+  // comment). selectedAltAudioId is null when using the main track
+  // baked into the video itself; setting it swaps in altAudioRef as the
+  // actual audio output instead.
+  const [extractedAudioMeta, setExtractedAudioMeta] = useState<ExtractedAudioTrack[]>([]);
+  const [selectedAltAudioId, setSelectedAltAudioId] = useState<string | null>(null);
+  const [altAudioUrl, setAltAudioUrl] = useState<string | null>(null);
+  const altAudioRef = useRef<HTMLAudioElement | null>(null);
   const [subtitleUrls, setSubtitleUrls] = useState<Record<string, string>>({});
   const [embeddedTracks, setEmbeddedTracks] = useState<TextTrack[]>([]);
   const [subtitleSelection, setSubtitleSelection] = useState<SubtitleSelection>("off");
@@ -288,6 +294,7 @@ export default function VideoPlayer({
   const [selectedAudioId, setSelectedAudioId] = useState<string | null>(null);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
   const avMenuWrapRef = useRef<HTMLDivElement>(null);
+  const micClusterRef = useRef<HTMLDivElement>(null);
 
   const showNote = useCallback((text: string, ms = 2500) => {
     setStatusNote(text);
@@ -331,18 +338,23 @@ useEffect(() => {
   // through every screen between the lobby and the player.
   useEffect(() => {
     setSubtitleSelection("off");
+    setSelectedAltAudioId(null);
     if (!room.movie_path) {
       setSubtitleMeta([]);
+      setExtractedAudioMeta([]);
       return;
     }
     let cancelled = false;
     (async () => {
       const { data } = await supabase
         .from("movies")
-        .select("subtitles")
+        .select("subtitles, audio_tracks")
         .eq("storage_path", room.movie_path)
         .maybeSingle();
-      if (!cancelled) setSubtitleMeta((data?.subtitles as Subtitle[] | undefined) ?? []);
+      if (!cancelled) {
+        setSubtitleMeta((data?.subtitles as Subtitle[] | undefined) ?? []);
+        setExtractedAudioMeta((data?.audio_tracks as ExtractedAudioTrack[] | undefined) ?? []);
+      }
     })();
     return () => {
       cancelled = true;
@@ -503,14 +515,119 @@ useEffect(() => {
     return () => window.removeEventListener("mousedown", onClick);
   }, [audioMenuOpen, subsMenuOpen, speedMenuOpen, volumeMenuOpen]);
 
+  // Same pattern, separate DOM region — the mic cluster (top-left,
+  // fullscreen only) has its own popover (call volume) that isn't part
+  // of the bottom control bar's av-menu group above.
+  useEffect(() => {
+    if (!callVolumeMenuOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (micClusterRef.current && !micClusterRef.current.contains(e.target as Node)) {
+        setCallVolumeMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [callVolumeMenuOpen]);
+
   const handleSelectAudioTrack = useCallback((id: string) => {
     const video = videoRef.current as MediaElementWithAudioTracks | null;
     const list = video?.audioTracks;
     if (!list) return;
     for (let i = 0; i < list.length; i++) list[i].enabled = list[i].id === id;
     setSelectedAudioId(id);
+    setSelectedAltAudioId(null);
+    if (video) video.muted = false; // in case an alt track had muted it
     setAudioMenuOpen(false);
   }, []);
+
+  // Selecting an extracted (app-level) alternate audio track. The
+  // video's own audio gets muted — the <audio> element (altAudioRef)
+  // becomes the actual audio output instead, kept in sync via the
+  // effect below. Passing null switches back to the video's own track.
+  const handleSelectAltAudioTrack = useCallback((id: string | null) => {
+    setSelectedAltAudioId(id);
+    if (videoRef.current) videoRef.current.muted = id !== null;
+    setAudioMenuOpen(false);
+  }, []);
+
+  // Resolve a presigned play URL for whichever alt track is selected —
+  // lazily, only for the one actually chosen, not all of them upfront
+  // (unlike subtitles, these can be tens to hundreds of MB each).
+  useEffect(() => {
+    if (!selectedAltAudioId) {
+      setAltAudioUrl(null);
+      return;
+    }
+    const track = extractedAudioMeta.find((t) => t.id === selectedAltAudioId);
+    if (!track) {
+      setAltAudioUrl(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/r2-play-url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: track.storage_path }),
+        });
+        const data = await res.json();
+        if (!cancelled && res.ok && data.url) setAltAudioUrl(data.url);
+      } catch {
+        // Leave altAudioUrl as-is (null) — the dropdown selection stays
+        // set, but with no URL the sync effect below has nothing to
+        // play; not worth a dedicated error state for this.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAltAudioId, extractedAudioMeta]);
+
+  // Keep the alternate-audio element mirroring the video: play/pause,
+  // seeking, and playback rate. This is a tight LOCAL sync between two
+  // elements on the same device — separate from (and in addition to)
+  // the partner-sync heartbeat logic elsewhere in this file, which only
+  // keeps the *video* in sync across the two people's devices. The
+  // video stays the single timing source of truth either way; this
+  // just mirrors it.
+  useEffect(() => {
+    const video = videoRef.current;
+    const audio = altAudioRef.current;
+    if (!video || !audio || !altAudioUrl) return;
+
+    const resync = () => {
+      if (Math.abs(audio.currentTime - video.currentTime) > 0.25) {
+        audio.currentTime = video.currentTime;
+      }
+      if (audio.playbackRate !== video.playbackRate) audio.playbackRate = video.playbackRate;
+    };
+    const onPlay = () => {
+      resync();
+      audio.play().catch(() => {
+        // Autoplay-policy or similar rejection — the video itself keeps
+        // playing regardless; the person can toggle the track off/on to
+        // retry, same recovery path as any other transient media error.
+      });
+    };
+    const onPause = () => audio.pause();
+
+    resync();
+    if (!video.paused) onPlay();
+    video.addEventListener("play", onPlay);
+    video.addEventListener("pause", onPause);
+    video.addEventListener("seeked", resync);
+    video.addEventListener("timeupdate", resync);
+    video.addEventListener("ratechange", resync);
+    return () => {
+      video.removeEventListener("play", onPlay);
+      video.removeEventListener("pause", onPause);
+      video.removeEventListener("seeked", resync);
+      video.removeEventListener("timeupdate", resync);
+      video.removeEventListener("ratechange", resync);
+      audio.pause();
+    };
+  }, [altAudioUrl]);
 
   // Playback speed is a deliberate, immediate user choice — applied
   // directly rather than eased — but drift correction (above) needs to
@@ -1120,7 +1237,7 @@ useEffect(() => {
           )}
         </div>
 
-        {audioTracks.length > 1 && (
+        {(audioTracks.length > 1 || extractedAudioMeta.length > 0) && (
             <div className="relative">
               <button
                 onClick={() => {
@@ -1143,18 +1260,49 @@ useEffect(() => {
                   <p className="border-b border-reel-border px-3 py-1.5 text-[10px] uppercase tracking-wide text-reel-muted">
                     Audio language
                   </p>
+                  {/* Native in-video tracks (Safari-only as of 2026) —
+                      selecting one clears any extracted-track selection. */}
                   {audioTracks.map((t, i) => (
                     <button
-                      key={t.id || i}
+                      key={`native-${t.id || i}`}
                       onClick={() => handleSelectAudioTrack(t.id)}
                       className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
-                        selectedAudioId === t.id ? "text-reel-amber" : "text-reel-text"
+                        selectedAudioId === t.id && !selectedAltAudioId ? "text-reel-amber" : "text-reel-text"
                       }`}
                     >
                       <span className="truncate">{audioTrackDisplayLabel(t, i)}</span>
-                      {selectedAudioId === t.id && <span className="ml-2 shrink-0">✓</span>}
+                      {selectedAudioId === t.id && !selectedAltAudioId && <span className="ml-2 shrink-0">✓</span>}
                     </button>
                   ))}
+                  {/* Extracted (app-level) tracks — works on every
+                      browser, not just Safari, since it doesn't depend
+                      on the native audioTracks API at all. */}
+                  {extractedAudioMeta.map((t) => (
+                    <button
+                      key={`alt-${t.id}`}
+                      onClick={() => handleSelectAltAudioTrack(t.id)}
+                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
+                        selectedAltAudioId === t.id ? "text-reel-amber" : "text-reel-text"
+                      }`}
+                    >
+                      <span className="truncate">{t.label}</span>
+                      {selectedAltAudioId === t.id && <span className="ml-2 shrink-0">✓</span>}
+                    </button>
+                  ))}
+                  {/* Only meaningful once an extracted track has been
+                      picked — lets you switch back to the video's own
+                      original audio. */}
+                  {extractedAudioMeta.length > 0 && (
+                    <button
+                      onClick={() => handleSelectAltAudioTrack(null)}
+                      className={`flex w-full items-center justify-between border-t border-reel-border px-3 py-2 text-left text-xs transition hover:bg-reel-surface2 ${
+                        !selectedAltAudioId ? "text-reel-amber" : "text-reel-text"
+                      }`}
+                    >
+                      <span className="truncate">Original</span>
+                      {!selectedAltAudioId && <span className="ml-2 shrink-0">✓</span>}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1292,6 +1440,12 @@ useEffect(() => {
           )}
         </video>
 
+        {/* Hidden — becomes the actual audio output when an extracted
+            alternate audio track is selected (video muted in that case,
+            see handleSelectAltAudioTrack). Kept in sync via the effect
+            above rather than being controllable directly. */}
+        <audio ref={altAudioRef} src={altAudioUrl ?? undefined} preload="auto" className="hidden" />
+
         {statusNote && (
           <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-black/70 px-4 py-1.5 text-sm text-reel-text backdrop-blur">
             {statusNote}
@@ -1389,6 +1543,7 @@ useEffect(() => {
             the control bar for a consistent show/hide feel. */}
         {isFullscreen && ptt && (
           <div
+            ref={micClusterRef}
             className={`absolute left-2 top-2 flex gap-2 transition-opacity duration-500 sm:left-3 sm:top-3 ${
               fsControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
             }`}
@@ -1426,6 +1581,43 @@ useEffect(() => {
             >
               <span className="text-sm">{ptt.status === "failed" ? "↻" : ptt.isTalking ? "🔴" : "🎙️"}</span>
             </button>
+
+            {ptt.status !== "unsupported" && (
+              <div className="relative">
+                <button
+                  onClick={() => setCallVolumeMenuOpen((v) => !v)}
+                  aria-label="Call volume"
+                  aria-expanded={callVolumeMenuOpen}
+                  title="Call volume — how loud your partner's voice plays"
+                  className={`flex h-9 w-9 items-center justify-center rounded-full backdrop-blur transition sm:h-8 sm:w-8 ${
+                    callVolumeMenuOpen
+                      ? "bg-reel-amber text-reel-bg"
+                      : "bg-black/30 text-reel-text hover:bg-black/50"
+                  }`}
+                >
+                  <span className="text-sm">
+                    {ptt.callVolume === 0 ? "🔇" : ptt.callVolume < 0.5 ? "🔉" : "🔊"}
+                  </span>
+                </button>
+                {callVolumeMenuOpen && (
+                  <div className="absolute left-0 top-full z-20 mt-2 rounded-lg border border-reel-border bg-reel-surface p-3 shadow-xl">
+                    <p className="mb-2 whitespace-nowrap text-[10px] uppercase tracking-wide text-reel-muted">
+                      Call volume
+                    </p>
+                    <input
+                      type="range"
+                      aria-label="Call volume"
+                      className="volumebar w-24"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={ptt.callVolume}
+                      onChange={(e) => ptt.onCallVolumeChange(Number(e.target.value))}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

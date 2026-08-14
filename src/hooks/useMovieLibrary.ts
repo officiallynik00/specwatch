@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
-import type { Movie, Subtitle } from "@/lib/types";
+import type { Movie, Subtitle, ExtractedAudioTrack } from "@/lib/types";
+import { canAttemptExtraction, extractAlternateAudioTracks } from "@/lib/audioExtract";
+import { languageDisplayName } from "@/lib/language";
 
 const MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5GB — well under B2's 10GB free-tier storage cap
 // If no new progress event arrives within this window, treat the current
@@ -153,6 +155,8 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
   const [progress, setProgress] = useState(0);
   const [resuming, setResuming] = useState(false);
   const [etaSeconds, setEtaSeconds] = useState<number | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractionStatus, setExtractionStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const activeXhrRef = useRef<XMLHttpRequest | null>(null);
   const lastSampleTimeRef = useRef<number>(0);
@@ -259,6 +263,58 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
       const movieId = session?.movieId ?? crypto.randomUUID();
       const ext = file.name.split(".").pop() || "mp4";
       const path = session?.path ?? `${roomCode}/${movieId}.${ext}`;
+
+      // Extract any alternate embedded audio tracks (e.g. a second,
+      // Hindi-language track alongside the primary English one) before
+      // touching the main video upload. This re-runs on a resumed
+      // upload too, not just a fresh one — extraction is a stream copy
+      // (no re-encoding), so it's fast even for a full movie, and
+      // keeping this simple avoids needing to separately persist which
+      // extracted tracks were already uploaded across a paused session.
+      const extractedAudioTracks: ExtractedAudioTrack[] = [];
+      if (canAttemptExtraction(file)) {
+        try {
+          setExtracting(true);
+          const streams = await extractAlternateAudioTracks(file, setExtractionStatus);
+          for (const stream of streams) {
+            const trackId = crypto.randomUUID();
+            const trackPath = `${roomCode}/${movieId}/audio/${trackId}.m4a`;
+            setExtractionStatus(`Uploading extracted audio track…`);
+            let signedUrl: string;
+            try {
+              const res = await fetch("/api/r2-upload-url", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: trackPath, contentType: "audio/mp4" }),
+              });
+              const data = await res.json();
+              if (!res.ok || !data.url) continue; // skip this one track, not the whole upload
+              signedUrl = data.url;
+            } catch {
+              continue;
+            }
+            const result = await uploadBlobWithProgress(signedUrl, stream.blob, "audio/mp4", () => {}, {
+              current: null,
+            });
+            if (result.error || result.cancelled) continue;
+            const langName = languageDisplayName(stream.language);
+            extractedAudioTracks.push({
+              id: trackId,
+              storage_path: trackPath,
+              label: langName ?? `Audio track ${stream.audioIndex + 1}`,
+              language: stream.language,
+            });
+          }
+        } catch {
+          // Extraction failing entirely (e.g. the ffmpeg.wasm core
+          // failed to load — no network, an ad-blocker, etc.) shouldn't
+          // block the actual movie upload. The movie still uploads
+          // normally, just without any extra selectable audio tracks.
+        } finally {
+          setExtracting(false);
+          setExtractionStatus(null);
+        }
+      }
 
       let uploadId = session?.uploadId ?? null;
       if (!uploadId) {
@@ -411,6 +467,7 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
           storage_path: path,
           title,
           file_size_bytes: file.size,
+          audio_tracks: extractedAudioTracks,
         })
         .select()
         .single();
@@ -575,6 +632,8 @@ export function useMovieLibrary({ roomId, roomCode }: UseMovieLibraryOptions) {
     progress,
     resuming,
     etaSeconds,
+    extracting,
+    extractionStatus,
     error,
     addMovie,
     cancelUpload,

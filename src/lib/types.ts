@@ -19,6 +19,20 @@ export interface Room {
   total_watch_seconds: number;
 }
 
+// An audio track extracted client-side (via ffmpeg.wasm, at upload time)
+// from a movie file that had more than one embedded audio stream — e.g.
+// English + Hindi muxed into one MKV. Stream 0 stays baked into the main
+// uploaded video as before; every additional stream gets pulled out as
+// its own small file here, so it can be selected independent of whatever
+// the browser's native (now largely Safari-only) audioTracks API does or
+// doesn't support. Same shape/spirit as Subtitle above.
+export interface ExtractedAudioTrack {
+  id: string;
+  storage_path: string;
+  label: string; // e.g. "Hindi", resolved from the stream's language tag
+  language?: string;
+}
+
 // An external subtitle file (.vtt or .srt, converted to VTT client-side
 // on load) attached to a library movie. Uploaded separately from the
 // movie itself, via the same presigned B2 routes.
@@ -40,6 +54,7 @@ export interface Movie {
   file_size_bytes: number | null;
   uploaded_at: string;
   subtitles: Subtitle[];
+  audio_tracks: ExtractedAudioTrack[];
 }
 
 export interface ChatMessage {

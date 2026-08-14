@@ -10,6 +10,8 @@ interface MovieLibraryProps {
   progress: number;
   resuming: boolean;
   etaSeconds: number | null;
+  extracting: boolean;
+  extractionStatus: string | null;
   error: string | null;
   currentMoviePath: string | null;
   onAdd: (file: File) => void;
@@ -51,6 +53,8 @@ export default function MovieLibrary({
   progress,
   resuming,
   etaSeconds,
+  extracting,
+  extractionStatus,
   error,
   currentMoviePath,
   onAdd,

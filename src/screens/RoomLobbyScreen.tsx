@@ -240,6 +240,8 @@ export default function RoomLobbyScreen() {
             progress={library.progress}
             resuming={library.resuming}
             etaSeconds={library.etaSeconds}
+            extracting={library.extracting}
+            extractionStatus={library.extractionStatus}
             error={library.error}
             currentMoviePath={room.movie_path}
             onAdd={library.addMovie}
