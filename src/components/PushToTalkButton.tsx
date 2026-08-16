@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PttStatus } from "@/hooks/usePushToTalk";
 
 interface PushToTalkButtonProps {
@@ -14,6 +14,8 @@ interface PushToTalkButtonProps {
   onRetry: () => void;
   callVolume: number;
   onCallVolumeChange: (v: number) => void;
+  remotePlayBlocked: boolean;
+  onRetryRemotePlay: () => void;
   // The windowed chat drawer becomes a full-width bottom sheet
   // (h-[70dvh]) on mobile, but only below Tailwind's sm breakpoint —
   // at sm and up it's a fixed-size corner panel that doesn't reach
@@ -41,9 +43,28 @@ export default function PushToTalkButton({
   onRetry,
   callVolume,
   onCallVolumeChange,
+  remotePlayBlocked,
+  onRetryRemotePlay,
   chatOpen,
 }: PushToTalkButtonProps) {
   const [volumeOpen, setVolumeOpen] = useState(false);
+  const volumeWrapRef = useRef<HTMLDivElement>(null);
+
+  // Same outside-click-to-close pattern as the fullscreen mic cluster's
+  // identical call-volume popover (see VideoPlayer.tsx's micClusterRef) —
+  // this windowed version was missing it entirely, so tapping anywhere
+  // else on the page previously did nothing; only re-tapping the button
+  // itself closed it.
+  useEffect(() => {
+    if (!volumeOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (volumeWrapRef.current && !volumeWrapRef.current.contains(e.target as Node)) {
+        setVolumeOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [volumeOpen]);
 
   // Tap-to-toggle: one tap turns the mic on and leaves it on, the next
   // tap turns it off — as opposed to the earlier press-and-hold design.
@@ -85,6 +106,14 @@ export default function PushToTalkButton({
           {label}
         </span>
       )}
+      {remotePlayBlocked && (
+        <button
+          onClick={onRetryRemotePlay}
+          className="rounded-full border border-reel-rose/40 bg-reel-rose/10 px-3 py-1 text-xs text-reel-rose transition hover:bg-reel-rose/20"
+        >
+          🔇 Tap to hear {partnerName ?? "your partner"}
+        </button>
+      )}
       <div className="flex items-end gap-2">
         <button
           onClick={handleClick}
@@ -109,7 +138,7 @@ export default function PushToTalkButton({
         </button>
 
         {volumeControlAvailable && (
-          <div className="relative">
+          <div ref={volumeWrapRef} className="relative">
             <button
               onClick={() => setVolumeOpen((v) => !v)}
               aria-label="Call volume"

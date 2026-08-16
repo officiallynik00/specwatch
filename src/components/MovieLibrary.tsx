@@ -84,7 +84,11 @@ export default function MovieLibrary({
       <div className="mb-3 flex items-center justify-between">
         <p className="font-display text-lg italic text-reel-text">Library</p>
         <label className="cursor-pointer rounded-full border border-reel-border px-3 py-1.5 text-xs text-reel-muted transition hover:border-reel-amber hover:text-reel-amber">
-          {uploading ? `${resuming ? "Resuming" : "Uploading"}… ${progress}%` : "+ Add movie"}
+          {uploading
+            ? extracting
+              ? (extractionStatus ?? "Scanning audio tracks…")
+              : `${resuming ? "Resuming" : "Uploading"}… ${progress}%`
+            : "+ Add movie"}
           <input
             type="file"
             accept="video/mp4,video/*"

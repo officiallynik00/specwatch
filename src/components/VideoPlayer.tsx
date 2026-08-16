@@ -99,6 +99,8 @@ interface VideoPlayerProps {
     onRetry: () => void;
     callVolume: number;
     onCallVolumeChange: (v: number) => void;
+    remotePlayBlocked: boolean;
+    onRetryRemotePlay: () => void;
   };
 }
 
@@ -1617,6 +1619,15 @@ useEffect(() => {
                   </div>
                 )}
               </div>
+            )}
+
+            {ptt.remotePlayBlocked && (
+              <button
+                onClick={ptt.onRetryRemotePlay}
+                className="flex h-9 items-center gap-1.5 rounded-full bg-reel-rose/20 px-3 text-[11px] text-reel-rose backdrop-blur transition hover:bg-reel-rose/30 sm:h-8"
+              >
+                🔇 Tap to hear partner
+              </button>
             )}
           </div>
         )}

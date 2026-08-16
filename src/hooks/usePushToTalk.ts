@@ -57,6 +57,14 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
   const [isTalking, setIsTalking] = useState(false);
   const [partnerTalking, setPartnerTalking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Tracked separately from `error` — this isn't a connection failure,
+  // the call IS working, the browser's autoplay policy is just blocking
+  // playback of the partner's incoming audio specifically. Previously
+  // this failure was silently swallowed entirely: status would show
+  // "connected", the partner could be actively talking, and the person
+  // would just... not hear anything, with zero indication why or how
+  // to fix it.
+  const [remotePlayBlocked, setRemotePlayBlocked] = useState(false);
   // How loud the *partner's voice* plays, independent of movie volume —
   // persisted since it's a personal comfort preference, same spirit as
   // remembering a chosen movie volume would be if that existed too.
@@ -106,12 +114,20 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
       }
       remoteAudioElRef.current.volume = callVolume;
       remoteAudioElRef.current.srcObject = stream;
-      remoteAudioElRef.current.play().catch(() => {
-        // Autoplay can be blocked without a prior user gesture on the page.
-        // By the time a partner's track arrives, the person has already
-        // clicked "join room", so this is a rare edge case — surfacing an
-        // error here would just be noise.
-      });
+      remoteAudioElRef.current
+        .play()
+        .then(() => setRemotePlayBlocked(false))
+        .catch(() => {
+          // Autoplay can be blocked without a prior user gesture on the
+          // page. By the time a partner's track arrives, the person has
+          // usually already clicked something (joining the room), so
+          // this is uncommon — but when it does happen, silently eating
+          // it would mean never hearing the partner at all with zero
+          // indication why. Surface it instead, with a manual retry
+          // (retryRemotePlay below) that's guaranteed to satisfy
+          // autoplay policy since it's a direct tap.
+          setRemotePlayBlocked(true);
+        });
     },
     [callVolume]
   );
@@ -122,6 +138,19 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
       remoteAudioElRef.current.remove();
       remoteAudioElRef.current = null;
     }
+    setRemotePlayBlocked(false);
+  }, []);
+
+  // A direct tap is an unambiguous user gesture, so this is expected to
+  // succeed even when the original automatic .play() call didn't.
+  const retryRemotePlay = useCallback(() => {
+    remoteAudioElRef.current
+      ?.play()
+      .then(() => setRemotePlayBlocked(false))
+      .catch(() => {
+        // Still blocked somehow — leave the prompt showing rather than
+        // pretending it worked.
+      });
   }, []);
 
   // Applies live if the slider moves mid-call — attachRemoteStream only
@@ -453,5 +482,7 @@ export function usePushToTalk({ roomCode, myName, partnerName, isHost }: UsePush
     retry,
     callVolume,
     setCallVolume,
+    remotePlayBlocked,
+    retryRemotePlay,
   };
 }

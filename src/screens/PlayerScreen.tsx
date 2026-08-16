@@ -223,6 +223,8 @@ export default function PlayerScreen() {
               onRetry: ptt.retry,
               callVolume: ptt.callVolume,
               onCallVolumeChange: ptt.setCallVolume,
+              remotePlayBlocked: ptt.remotePlayBlocked,
+              onRetryRemotePlay: ptt.retryRemotePlay,
             }}
           />
         )}
@@ -252,6 +254,8 @@ export default function PlayerScreen() {
         onRetry={ptt.retry}
         callVolume={ptt.callVolume}
         onCallVolumeChange={ptt.setCallVolume}
+        remotePlayBlocked={ptt.remotePlayBlocked}
+        onRetryRemotePlay={ptt.retryRemotePlay}
         chatOpen={chatOpen}
       />
     </main>
